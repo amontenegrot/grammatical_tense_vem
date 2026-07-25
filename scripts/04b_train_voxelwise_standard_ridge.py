@@ -1,0 +1,171 @@
+# scripts/04b_train_voxelwise_standard_ridge.py
+#*
+"""
+Orquestador de Entrenamiento a Nivel de Sujeto (Enfoque Primal / Estándar).
+Implementa extracción, ensamblaje y modelamiento de la matriz fMRI, delegando
+el procesamiento al estimador por lotes para preservar los límites de RAM (WSL).
+Mantiene política estricta de punto de control (checkpointing).
+"""
+
+import gc
+import multiprocessing
+import os
+import time
+from typing import Tuple
+
+# Decisión técnica: Asegura que el backend en C subyacente (OpenBLAS/MKL)
+# vectorice las operaciones matemáticas ocupando el 100% de la CPU lógica.
+# Debe ejecutarse antes de la importación de Numpy/Pandas.
+TOTAL_CORES = str(multiprocessing.cpu_count())
+os.environ["OMP_NUM_THREADS"] = TOTAL_CORES
+os.environ["OPENBLAS_NUM_THREADS"] = TOTAL_CORES
+os.environ["MKL_NUM_THREADS"] = TOTAL_CORES
+os.environ["VECLIB_MAXIMUM_THREADS"] = TOTAL_CORES
+os.environ["NUMEXPR_NUM_THREADS"] = TOTAL_CORES
+
+import numpy as np
+import pandas as pd
+
+from src.config import (
+    DIR_FEATURES_FMRI_TR,
+    DIR_PROCESSED,
+    N_PERMUTATIONS,
+    SPACES_DIMENSIONS,
+    TEST_STORY,
+    VOXEL_BATCH_SIZE,
+)
+from src.data_loader import load_fmri_data
+from src.db_manager import load_table_to_dataframe, log_execution_time
+from src.models.standard_ridge import StandardVoxelwiseEncoder
+
+
+FEATURES_IN_DIR = DIR_FEATURES_FMRI_TR
+RESULTS_OUT_DIR = DIR_PROCESSED / "results_voxelwise"
+
+
+def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
+    """Ensambla matrices predictoras (X) y de respuesta (Y) concatenando historias.
+    
+    Aplica una conversión estricta a float32 desde la carga, reduciendo el 
+    peso en memoria a la mitad (vital para sujetos con múltiples sesiones).
+    
+    Args:
+        subject_sessions (pd.DataFrame): Filas del registro de auditoría 
+            correspondientes al sujeto.
+        
+    Returns:
+        Tuple: (x_train, y_train, x_test, y_test). Retorna (None, None, None, None)
+            si faltan archivos o datos.
+    """
+    x_train_list, y_train_list = [], []
+    x_test, y_test = None, None
+    
+    for _, row in subject_sessions.iterrows():
+        story = row['story']
+        fmri_path = row['fmri_path']
+        feature_path = FEATURES_IN_DIR / f"{story}_fmri_features.parquet"
+        
+        if not feature_path.exists():
+            print(f"Advertencia: Características faltantes para {story}. Omitiendo.")
+            continue
+            
+        y_data = load_fmri_data(fmri_path)
+        if y_data is None:
+            continue
+            
+        # Decisión técnica: Coerción inmediata a precisión simple.
+        x_data = pd.read_parquet(feature_path).values.astype(np.float32)
+        y_data = y_data.astype(np.float32)
+        
+        # Truncado de seguridad para emparejar diferencias mínimas de adquisición (TR)
+        min_samples = min(x_data.shape[0], y_data.shape[0])
+        x_data = x_data[:min_samples, :]
+        y_data = y_data[:min_samples, :]
+        
+        if story == TEST_STORY:
+            if x_test is None: 
+                x_test, y_test = x_data, y_data
+        else:
+            x_train_list.append(x_data)
+            y_train_list.append(y_data)
+            
+    if not x_train_list or x_test is None:
+        return None, None, None, None
+        
+    # Ensamblaje final
+    x_train_full = np.vstack(x_train_list)
+    y_train_full = np.vstack(y_train_list)
+    
+    # Decisión técnica: Liberar listas inmediatamente de la memoria para evitar duplicidad.
+    del x_train_list, y_train_list
+    gc.collect()
+    
+    return x_train_full, y_train_full, x_test, y_test
+
+def run_subject_level_modeling() -> None:
+    """Orquesta el ajuste de modelos por participante con punto de control.
+    
+    Itera de forma ordenada sobre los sujetos, carga los datos transformados 
+    en el espacio primal y delega la estimación por lotes para preservar RAM.
+    Aplica liberación de memoria estricta al finalizar cada participante.
+    """
+    RESULTS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    df_sessions = load_table_to_dataframe('audit_sessions')
+    if df_sessions is None or df_sessions.empty:
+        print("Error: No se encontró la tabla 'audit_sessions'.")
+        return
+        
+    subjects = sorted(df_sessions['subject_id'].unique())
+    encoder = StandardVoxelwiseEncoder(SPACES_DIMENSIONS)
+    
+    for subject_id in subjects:
+        start_time = time.time()
+        print(f"\n--- Procesando Participante: {subject_id} ---")
+        
+        subject_out_file = RESULTS_OUT_DIR / f"{subject_id}_voxelwise_results.parquet"
+        if subject_out_file.exists():
+            print(f"[OMITIDO] El participante {subject_id} ya fue procesado.")
+            continue
+            
+        subject_records = df_sessions[df_sessions['subject_id'] == subject_id]
+        print(f"Ensamblando matrices para {len(subject_records)} sesiones...")
+        
+        x_tr, y_tr, x_te, y_te = build_matrices(subject_records)
+        if x_tr is None:
+            print(f"[ERROR] Datos insuficientes para partición en {subject_id}.")
+            continue
+            
+        print(f"Entrenamiento: X={x_tr.shape}, Y={y_tr.shape} (Primal)")
+        print(f"Evaluación: X={x_te.shape}, Y={y_te.shape}")
+        print(f"Iniciando estimación por lotes ({N_PERMUTATIONS} permutaciones)...")
+        
+        try:
+            df_results = encoder.fit_and_evaluate(
+                x_train=x_tr, 
+                y_train=y_tr, 
+                x_test=x_te, 
+                y_test=y_te, 
+                n_permutations=N_PERMUTATIONS,
+                batch_size=VOXEL_BATCH_SIZE
+            )
+            
+            df_results.to_parquet(subject_out_file, engine='pyarrow', index=False)
+            print(f"[ÉXITO] Resultados persistidos en {subject_out_file.name}")
+            
+        except Exception as e:
+            print(f"[ERROR] Fallo modelando al sujeto {subject_id}: {str(e)}")
+            
+        finally:
+            # Limpieza de memoria
+            del x_tr, y_tr, x_te, y_te
+            if 'df_results' in locals():
+                del df_results
+            gc.collect()
+            
+            elapsed = time.time() - start_time
+            log_execution_time("04b_standard_ridge", elapsed, subject_id)
+
+if __name__ == "__main__":
+    print(f"Iniciando pipeline. OpenBLAS configurado para usar {TOTAL_CORES} hilos lógicos.")
+    run_subject_level_modeling()

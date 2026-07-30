@@ -81,39 +81,17 @@ class StandardVoxelwiseEncoder:
         lotes (`batch_size`) a lo largo del eje espacial (vóxeles). Esto impide 
         que Himalaya genere matrices tridimensionales de error que colapsen la RAM.
         
-        Args:
-            x_train: Matriz predictora de entrenamiento (muestras temporales, características).
-            y_train: Matriz fMRI de entrenamiento (muestras temporales, vóxeles totales).
-            x_test: Matriz predictora de evaluación.
-            y_test: Matriz fMRI de evaluación.
-            n_permutations: Cantidad de desplazamientos circulares para distribución nula.
-            batch_size: Cantidad máxima de vóxeles a procesar por iteración.
-            
-        Returns:
-            pd.DataFrame: Tabla con vóxeles, R2 de ambos modelos, Delta R2, y valores p.
+        Nota: La estandarización global fue removida de esta función porque los 
+        datos ya vienen estandarizados por sesión desde 'build_matrices'.
         """
         n_voxels = y_train.shape[1]
         n_test_samples = y_test.shape[0]
         
-        # 1. Limpieza y estandarización de X 
-        # Decisión técnica: X es muy pequeña (45 cols), se limpia globalmente sin riesgo de RAM.
-        x_train = np.nan_to_num(x_train, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-        x_test = np.nan_to_num(x_test, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-        
-        x_tr_mean = x_train.mean(axis=0)
-        x_tr_std = x_train.std(axis=0)
-        x_tr_std[x_tr_std == 0] = 1.0  # Prevención de división por cero
-        
-        # Operaciones "in-place" para no crear copias en memoria
-        x_train -= x_tr_mean
-        x_train /= x_tr_std
-        x_test -= x_tr_mean
-        x_test /= x_tr_std
-        
+        # Divisiones de Ablación para el modelo restringido
         x_train_restricted = x_train[:, :self.restricted_limit]
         x_test_restricted = x_test[:, :self.restricted_limit]
         
-        # 2. Pre-asignación de arrays unidimensionales para los resultados finales
+        # Pre-asignación de arrays unidimensionales para los resultados finales
         r2_global_full = np.zeros(n_voxels, dtype=np.float32)
         r2_restricted_full = np.zeros(n_voxels, dtype=np.float32)
         delta_r2_full = np.zeros(n_voxels, dtype=np.float32)
@@ -122,24 +100,14 @@ class StandardVoxelwiseEncoder:
         # Exclusión de bordes para permutaciones válidas (evita correlación residual de HRF)
         valid_shifts = np.arange(10, n_test_samples - 10)
         
-        # 3. Procesamiento Espacial por Lotes (Chunking)
+        # Procesamiento Espacial por Lotes (Chunking)
         for start_idx in range(0, n_voxels, batch_size):
             end_idx = min(start_idx + batch_size, n_voxels)
             print(f"      -> Procesando bloque de vóxeles [{start_idx}:{end_idx}] de {n_voxels}...")
             
-            # Extracción y limpieza exclusiva del bloque (ahorro masivo de RAM)
-            y_tr_batch = np.nan_to_num(y_train[:, start_idx:end_idx], nan=0.0).astype(np.float32)
-            y_te_batch = np.nan_to_num(y_test[:, start_idx:end_idx], nan=0.0).astype(np.float32)
-            
-            # Estandarización estricta del bloque
-            y_mean = y_tr_batch.mean(axis=0)
-            y_std = y_tr_batch.std(axis=0)
-            y_std[y_std == 0] = 1.0
-            
-            y_tr_batch -= y_mean
-            y_tr_batch /= y_std
-            y_te_batch -= y_mean
-            y_te_batch /= y_std
+            # Extracción del bloque (ahorro masivo de RAM)
+            y_tr_batch = y_train[:, start_idx:end_idx]
+            y_te_batch = y_test[:, start_idx:end_idx]
             
             # Entrenamiento y Predicción: Modelo Global
             self.global_model.fit(x_train, y_tr_batch)
@@ -179,11 +147,10 @@ class StandardVoxelwiseEncoder:
             p_raw_full[start_idx:end_idx] = p_raw
             
             # Decisión técnica: Recolección explícita de basura para mitigar el 90% de ocupación de RAM.
-            # Limpia los arrays temporales de Himalaya al finalizar cada lote.
             del y_tr_batch, y_te_batch, y_pred_g, y_pred_r, null_dist
             gc.collect()
             
-        # 4. Corrección de Múltiples Comparaciones (FDR) con parámetro dinámico
+        # Corrección de Múltiples Comparaciones (FDR)
         print("      -> Calculando corrección FDR global...")
         _, p_fdr, _, _ = multipletests(p_raw_full, alpha=STATISTICAL_ALPHA, method='fdr_bh')
         

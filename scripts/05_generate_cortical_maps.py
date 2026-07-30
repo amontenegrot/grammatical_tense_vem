@@ -168,7 +168,7 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------
     # FLUJO DUAL (Interactivo o por Lotes)
     # --------------------------------------------------------------------------
-    SUBJECT_INPUT: Union[str, List[str]] = "sub-UTS09"
+    SUBJECT_INPUT: Union[str, List[str]] = "sub-UTS03"
     # SUBJECT_INPUT: Union[str, List[str]] = [
     #     "sub-UTS01", "sub-UTS02", "sub-UTS03", "sub-UTS04",
     #     "sub-UTS05", "sub-UTS06", "sub-UTS07", "sub-UTS08", "sub-UTS09"

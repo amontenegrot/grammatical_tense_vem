@@ -30,12 +30,7 @@ PYCORTEX_DB_PATH = DATA_DIR / "derivatives" / "pycortex-db"
 
 
 def configure_pycortex() -> None:
-    """Configura de manera forzada y segura la ruta local de PyCortex.
-
-    Sobrescribe la configuración nativa de PyCortex en ~/.config/pycortex
-    para apuntar estrictamente a la base de datos derivada (pycortex-db) 
-    dentro de la carpeta del proyecto. Previene errores de sujeto no encontrado.
-    """
+    """Configura de manera forzada y segura la ruta local de PyCortex."""
     cortex_cfg_dir = Path(os.path.expanduser("~/.config/pycortex"))
     cortex_cfg_dir.mkdir(parents=True, exist_ok=True)
     cortex_cfg_file = cortex_cfg_dir / "options.cfg"
@@ -58,16 +53,7 @@ def configure_pycortex() -> None:
 
 
 def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> None:
-    """Proyecta los datos de ML en la corteza y genera el visor web.
-
-    Extrae R2 Global y Delta R2, aplica una máscara estricta binaria basada 
-    en FDR y crea dos capas de visualización intercambiables en la interfaz.
-
-    Args:
-        subject_id (str): Identificador del participante (ej. 'sub-UTS01').
-        start_server (bool, opcional): Si es True, despliega el servidor 
-            interactivo local en el navegador. Por defecto es False.
-    """
+    """Proyecta los datos de ML en la corteza y genera el visor web."""
     results_path = RESULTS_IN_DIR / f"{subject_id}_voxelwise_results.parquet"
 
     if not results_path.exists():
@@ -82,14 +68,19 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
     delta_r2 = df_results["delta_r2_tense"].values.astype(float)
     p_values = df_results["p_value_fdr"].values
 
-    # 2. Máscara de Transparencia Estricta (Binary Alpha Mask)
-    # Se usa float(1.0) para vóxeles significativos y 0.0 para no significativos.
-    # El color (intensidad) es independiente de esta máscara y se conservará intacto.
+    # 2. Enmascarado de Datos (Reemplazando Alpha Mask por NaN)
+    # PyCortex omite (hace transparentes) los valores NaN nativamente.
+    # Esto evita el bug de serialización JSON de arreglos en Python 3.12.
     is_significant = p_values < STATISTICAL_ALPHA
-    alpha_mask = is_significant.astype(float)
     n_sig_voxels = np.sum(is_significant)
+    print(f"[INFO] Vóxeles significativos (Tense): {n_sig_voxels:,} (FDR < {STATISTICAL_ALPHA})")
 
-    print(f"[INFO] Vóxeles significativos a graficar: {n_sig_voxels:,} (FDR < {STATISTICAL_ALPHA})")
+    # Para el Sanity Check (R2 Global), mostramos solo vóxeles donde el modelo predice algo
+    # de forma decente (> 1% de varianza), sin importar el p-value del Tense.
+    r2_global_masked = np.where(r2_global > 0.01, r2_global, np.nan)
+    
+    # Para la red de Tiempo Gramatical, filtramos ESTRICTAMENTE por significancia estadística
+    delta_r2_masked = np.where(is_significant, delta_r2, np.nan)
 
     try:
         # 3. Validación Anatómica
@@ -114,33 +105,35 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
             
         xfm_name = xfm_names[0]
 
-        # 4. Cálculo de Umbrales Visuales Dinámicos
-        vmax_global = 0.01
+        # 4. Cálculo de Umbrales Visuales Dinámicos (Forzados a Float puro)
+        # Se extraen los valores que NO son NaN para calcular el percentil 99 real
+        vmax_global = 0.05
+        valid_global = r2_global_masked[~np.isnan(r2_global_masked)]
+        if len(valid_global) > 0:
+            vmax_global = max(float(np.percentile(valid_global, 99)), 0.05)
+
         vmax_delta = 0.01
-        
-        if n_sig_voxels > 0:
-            vmax_global = max(float(np.percentile(r2_global[is_significant], 99)), 0.01)
-            vmax_delta = max(float(np.percentile(delta_r2[is_significant], 99)), 0.01)
+        valid_delta = delta_r2_masked[~np.isnan(delta_r2_masked)]
+        if len(valid_delta) > 0:
+            vmax_delta = max(float(np.percentile(valid_delta, 99)), 0.01)
 
         # 5. Construcción de Capas Volumétricas (Layers)
         vol_global = cortex.Volume(
-            r2_global,
+            r2_global_masked,
             subject=cortex_subject,
             xfmname=xfm_name,
             cmap=CORTICAL_COLORMAP, 
-            vmin=0.0,
-            vmax=vmax_global,
-            alpha=alpha_mask
+            vmin=0.01,
+            vmax=vmax_global
         )
 
         vol_tense = cortex.Volume(
-            delta_r2,
+            delta_r2_masked,
             subject=cortex_subject,
             xfmname=xfm_name,
             cmap=CORTICAL_COLORMAP, 
-            vmin=0.0,
-            vmax=vmax_delta,
-            alpha=alpha_mask
+            vmin=0.0001,
+            vmax=vmax_delta
         )
 
         layer_dict = {
@@ -168,7 +161,7 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
             _ = cortex.webshow(layer_dict, title=f"VEM Predictors - {subject_id}")
             input("\n[PAUSA] Presione ENTER en esta terminal para detener el servidor...")
 
-    except Exception as e:
+    except Exception:
         print(f"[ERROR] Falló el mapeo cortical para {subject_id}:")
         print(traceback.format_exc())
 
@@ -185,9 +178,10 @@ def print_methodological_guide() -> None:
     print("  - Descripcion: Precision total del modelo usando las 45 caracteristicas.")
     print("  - Implicacion metodologica: Actua como un 'Sanity Check'. Debe revelar")
     print("    actividad robusta en regiones clasicas del lenguaje (STG, Broca, Wernicke).")
-    print("    Confirma que la senal fMRI y el paradigma naturalista son viables.\n")
+    print("    Confirma que la senal fMRI y el paradigma naturalista son viables, probando")
+    print("    que la ausencia de efecto en el tiempo gramatical es real (True Null).")
     
-    print("Capa 2: Tense Specific Network (Delta R2)")
+    print("\nCapa 2: Tense Specific Network (Delta R2)")
     print("  - Descripcion: Varianza predictiva unica del Tiempo Gramatical Finito.")
     print("  - Implicacion metodologica: Responde de forma directa a la interrogante:")
     print("    '¿Que areas del cerebro procesan el tiempo gramatical en general?'")

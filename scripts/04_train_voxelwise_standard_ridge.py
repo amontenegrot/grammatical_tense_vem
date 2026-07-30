@@ -1,4 +1,4 @@
-# scripts/04b_train_voxelwise_standard_ridge.py
+# scripts/04_train_voxelwise_standard_ridge.py
 #*
 """
 Orquestador de Entrenamiento a Nivel de Sujeto (Enfoque Primal / Estándar).
@@ -36,7 +36,7 @@ from src.config import (
 )
 from src.data_loader import load_fmri_data
 from src.db_manager import load_table_to_dataframe, log_execution_time
-from src.models.standard_ridge_fix import StandardVoxelwiseEncoder
+from src.models.standard_ridge import StandardVoxelwiseEncoder
 
 
 FEATURES_IN_DIR = DIR_FEATURES_FMRI_TR
@@ -185,12 +185,7 @@ def run_subject_level_modeling() -> None:
             
             elapsed = time.time() - start_time
             log_execution_time("04b_standard_ridge", elapsed, subject_id)
-
-        # NUEVO: Detener el bucle después del primer participante (Sujeto 1)
-        # Decisión técnica: Break insertado temporalmente para aislar y validar 
-        # la corrección matemática antes de invertir horas en procesar toda la cohorte.
-        print(f"[TEST RUN] Finalizado {subject_id}. Abortando los demás por instrucción de prueba.")
-        break
+            
 
 if __name__ == "__main__":
     print(f"Iniciando pipeline. OpenBLAS configurado para usar {TOTAL_CORES} hilos lógicos.")

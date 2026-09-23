@@ -1,10 +1,9 @@
 # src/features/hemodynamics.py
 """Módulo de transformación neurovascular temporal.
 
-Contiene las funciones matemáticas para modelar la relación entre el estímulo
-y la señal BOLD, ofreciendo dos enfoques:
-1. Convolución con Respuesta Hemodinámica (HRF) Canónica (Double-Gamma).
-2. Expansión por Respuesta al Impulso Finito (FIR) mediante retardos temporales.
+Implementa la función de respuesta hemodinámica (HRF) canónica de doble gamma
+(estándar Friston / SPM) y la convolución temporal en el dominio de la frecuencia 
+(FFT) con remuestreo polifásico anti-aliasing hacia la escala del TR fMRI (0.5 Hz).
 """
 
 from typing import List
@@ -16,23 +15,21 @@ from scipy.signal import fftconvolve, resample_poly
 
 
 def generate_double_gamma_hrf(fs: int, duration: float = 32.0) -> np.ndarray:
-    """Genera una función HRF Double-Gamma canónica (estándar SPM).
+    """Genera una función HRF Doble-Gamma canónica (estándar SPM / Friston et al., 1998).
     
-    Modela biológicamente el pico inicial de sangre oxigenada (aprox. a los 6s) 
-    y la caída posterior o undershoot (aprox. a los 16s). Los parámetros de la 
-    curva se mantienen estáticos como constantes neurobiológicas.
+    Modela biológicamente el ascenso retardado de sangre oxigenada (pico aprox. a los 6s) 
+    y el descenso/undershoot posterior (aprox. a los 16s) durante una ventana de 32 segundos.
     
     Args:
-        fs (int): Frecuencia de muestreo original en Hz (resolución de las características).
-        duration (float, opcional): Duración total de la ventana de la respuesta 
-            en segundos. Por defecto es 32.0.
+        fs (int): Frecuencia de muestreo original en Hz (100 Hz = paso de 10 ms).
+        duration (float, opcional): Duración total de la ventana en segundos. Por defecto 32.0.
             
     Returns:
         np.ndarray: Vector 1D normalizado (suma = 1) que representa el filtro temporal HRF.
     """
     t = np.arange(0, duration, 1.0 / fs)
     
-    # Parámetros biológicos estándar de SPM
+    # Parámetros biológicos canónicos de doble gamma
     a1, b1 = 6.0, 1.0  # Parámetros del pico principal
     a2, b2 = 16.0, 1.0 # Parámetros del undershoot
     c = 1.0 / 6.0      # Ratio de dispersión
@@ -42,7 +39,7 @@ def generate_double_gamma_hrf(fs: int, duration: float = 32.0) -> np.ndarray:
     
     hrf = peak - (c * undershoot)
     
-    # Normalización para evitar escalar artificialmente la varianza del estímulo original
+    # Normalización para evitar alterar artificialmente la escala de los predictores
     return hrf / np.sum(hrf)
 
 
@@ -52,34 +49,34 @@ def apply_hrf_and_downsample(
     fs: int, 
     tr: float
 ) -> pd.DataFrame:
-    """Aplica convolución hemodinámica por FFT y reduce la resolución al TR.
+    """Aplica convolución hemodinámica por FFT y reduce la resolución temporal al TR.
     
-    Toma la matriz continua de características (ej. a 100 Hz), convoluciona cada 
-    columna con la HRF en el dominio de la frecuencia para máxima eficiencia (FFT), 
-    y finalmente aplica un filtro anti-aliasing reduciendo la señal a la escala 
-    del escáner fMRI.
+    Toma la matriz continua de características (100 Hz), convoluciona cada columna 
+    con la HRF en el dominio de la frecuencia para máxima eficiencia computacional, 
+    y aplica remuestreo polifásico con filtro anti-aliasing reduciendo la señal a 0.5 Hz.
     
     Args:
-        df_high_res (pd.DataFrame): Matriz original de características a alta resolución.
-        hrf_kernel (np.ndarray): Filtro temporal de la función HRF.
-        fs (int): Frecuencia de muestreo original de los datos (Hz).
-        tr (float): Tiempo de repetición de la adquisición fMRI en segundos.
+        df_high_res (pd.DataFrame): Matriz original de características a 100 Hz (43 cols).
+        hrf_kernel (np.ndarray): Filtro temporal HRF normalizado.
+        fs (int): Frecuencia de muestreo original de los predictores (100 Hz).
+        tr (float): Tiempo de repetición del escáner fMRI (2.0 segundos).
         
     Returns:
-        pd.DataFrame: Matriz hemodinámica transformada y remuestreada, cuyo 
-            índice de tiempo corresponde exactamente al TR del escáner.
+        pd.DataFrame: Matriz hemodinámica transformada a 0.5 Hz (TR), conservando
+            exactamente el orden y nombres de las 43 columnas originales.
     """
     n_samples, n_features = df_high_res.shape
     convolved_matrix = np.zeros((n_samples, n_features), dtype=np.float32)
     
-    # Convolución independiente por característica usando Transformada Rápida de Fourier
+    # Convolución independiente por columna vía Transformada Rápida de Fourier (FFT)
     for col_idx in range(n_features):
         feature_signal = df_high_res.iloc[:, col_idx].values
         convolved_signal = fftconvolve(feature_signal, hrf_kernel, mode='full')
+        # Se descarta la cola transitoria posterior conservando la duración original
         convolved_matrix[:, col_idx] = convolved_signal[:n_samples]
         
-    # Filtro anti-aliasing y reducción (Downsampling polifásico)
-    down_factor = int(fs * tr)
+    # Remuestreo polifásico anti-aliasing (Downsampling de 100 Hz a 0.5 Hz)
+    down_factor = int(fs * tr)  # 100 * 2.0 = 200
     up_factor = 1
     
     downsampled_matrix = resample_poly(convolved_matrix, up=up_factor, down=down_factor, axis=0)
@@ -96,36 +93,23 @@ def apply_hrf_and_downsample(
     
     return df_fmri_space
 
+
 def apply_fir_and_downsample(
     df_high_res: pd.DataFrame, 
     fs: int, 
     tr: float, 
     delays_in_trs: List[int] = [1, 2, 3, 4]
 ) -> pd.DataFrame:
-    """Aplica transformación de Respuesta al Impulso Finito (FIR).
+    """Aplica transformación de Respuesta al Impulso Finito (FIR) mediante retardos.
     
-    Optimización: Reduce la resolución de la matriz predictora al TR antes 
-    de crear los retardos (lags) para evitar explosiones de memoria RAM.
-    
-    Nota Metodológica: Si la matriz original tiene 45 características y se 
-    solicitan 4 retardos, la matriz resultante tendrá 180 características.
-    
-    Args:
-        df_high_res (pd.DataFrame): Matriz continua de características a alta resolución.
-        fs (int): Frecuencia de muestreo original de los datos (Hz).
-        tr (float): Tiempo de repetición del fMRI en segundos.
-        delays_in_trs (List[int], opcional): Lista de retardos a generar (en cantidad de TRs).
-            Por defecto [1, 2, 3, 4], cubriendo desde 2s hasta 8s (si TR=2.0s).
-            
-    Returns:
-        pd.DataFrame: Matriz remuestreada y expandida con las columnas retardadas.
+    Nota metodológica: El anteproyecto fija la HRF canónica uniforme como aproximación 
+    parsimoniosa principal para mantener 43 características y viabilidad en CPU. 
+    Esta función se conserva como referencia metodológica auxiliar.
     """
-    # 1. Reducción de resolución inmediata (Downsampling) para proteger memoria
     down_factor = int(fs * tr)
     up_factor = 1
     
     downsampled_matrix = resample_poly(df_high_res.values, up=up_factor, down=down_factor, axis=0)
-    
     n_tr_samples = downsampled_matrix.shape[0]
     tr_time_axis = np.arange(n_tr_samples) * tr
     
@@ -135,20 +119,12 @@ def apply_fir_and_downsample(
         index=tr_time_axis
     )
     
-    # 2. Generación de retardos (Lags)
     lagged_dataframes = []
-    
     for delay in delays_in_trs:
-        # shift() mueve las filas hacia abajo. fill_value=0.0 asegura 
-        # que el padding no introduzca NaNs que rompan el Ridge Regression.
         df_shifted = df_downsampled.shift(delay, fill_value=0.0)
-        
-        # Renombrar columnas para mantener trazabilidad (ej. 'past_regular_lag2')
         df_shifted.columns = [f"{col}_lag{delay}" for col in df_downsampled.columns]
         lagged_dataframes.append(df_shifted)
         
-    # 3. Concatenación horizontal masiva
     df_fir_space = pd.concat(lagged_dataframes, axis=1)
     df_fir_space.index.name = 'time_tr_seconds'
-    
     return df_fir_space

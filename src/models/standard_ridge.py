@@ -1,5 +1,4 @@
 # src/models/standard_ridge.py
-#*
 """Módulo de Machine Learning Predictivo (Espacio Primal).
 
 Implementa la Regresión de Cresta (Ridge) con procesamiento por lotes (chunking)

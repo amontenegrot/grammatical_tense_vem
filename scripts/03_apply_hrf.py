@@ -1,5 +1,4 @@
 # scripts/03_apply_hrf.py
-#*
 """Orquestador de Transformación Hemodinámica.
 
 Lee los espacios de alta resolución exportados en la Fase 2, ejecuta la 

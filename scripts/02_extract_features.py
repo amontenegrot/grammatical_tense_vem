@@ -1,5 +1,4 @@
 # scripts/02_extract_features.py
-#*
 """Orquestador de Extracción de Espacios de Características (Secuencial).
 
 Extrae propiedades lingüísticas y acústicas del corpus, delegando la tarea

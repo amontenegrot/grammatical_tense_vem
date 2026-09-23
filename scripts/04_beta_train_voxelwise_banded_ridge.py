@@ -1,5 +1,4 @@
 # scripts/04_beta_train_voxelwise_banded_ridge.py
-#*
 """Orquestador de Entrenamiento a Nivel de Sujeto (Enfoque Banded Ridge).
 
 Implementa una política estricta de punto de control (checkpointing).

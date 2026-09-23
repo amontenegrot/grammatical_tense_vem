@@ -1,5 +1,4 @@
 # src/features/hemodynamics.py
-#*
 """Módulo de transformación neurovascular temporal.
 
 Contiene las funciones matemáticas para modelar la relación entre el estímulo

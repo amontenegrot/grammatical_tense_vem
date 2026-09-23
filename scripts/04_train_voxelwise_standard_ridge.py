@@ -1,5 +1,4 @@
 # scripts/04_train_voxelwise_standard_ridge.py
-#*
 """
 Orquestador de Entrenamiento a Nivel de Sujeto (Enfoque Primal / Estándar).
 Implementa extracción, ensamblaje y modelamiento de la matriz fMRI, delegando

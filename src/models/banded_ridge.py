@@ -1,5 +1,4 @@
 # src/models/banded_ridge.py
-#*
 """Módulo de Machine Learning Predictivo (Espacio Dual / Múltiples Kernels).
 
 Encapsula la lógica de Banded Ridge Regression usando Himalaya y la validación

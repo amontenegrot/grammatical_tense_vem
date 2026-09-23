@@ -1,5 +1,4 @@
 # scripts/01a_audit_dataset.py
-#*
 """Orquestador de Auditoría del Conjunto de Datos.
 
 Cruza archivos fMRI HDF5, TextGrids y audios WAV para generar un mapeo 

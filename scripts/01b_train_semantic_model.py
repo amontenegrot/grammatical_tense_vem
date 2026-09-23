@@ -1,5 +1,4 @@
 # scripts/01b_train_semantic_model.py
-#*
 """Orquestador de Entrenamiento del Modelo Semántico Latente.
 
 Extrae el texto continuo de todo el corpus validado, lo lematiza eliminando 

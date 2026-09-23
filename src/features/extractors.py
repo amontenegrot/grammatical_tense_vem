@@ -1,5 +1,4 @@
 # src/features/extractors.py
-#*
 """Módulo de extractores de características.
 
 Implementa las reglas de transformación para proyectar propiedades acústicas 

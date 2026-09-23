@@ -1,240 +1,212 @@
 # scripts/05_statistical_interpretation.py
 """Orquestador de Interpretación Estadística.
 
-Lee los resultados del modelo Ridge Voxelwise (Nivel de Sujeto), calcula 
-métricas globales de varianza particionada (Delta R2) y tamaño del efecto, 
-y genera automáticamente un reporte en formato Markdown listo para ser 
-incluido en un manuscrito científico (LaTeX/Word).
+Lee los resultados de la regresión Ridge a nivel de vóxel por participante,
+calcula la distribución completa del aporte predictivo (Delta R2), caracteriza
+los vóxeles que superan la corrección FDR (reportando 'N/A' ante la ausencia de efecto)
+y genera un reporte en formato Markdown estructurado según los 3 escenarios del anteproyecto.
 """
 
-import pandas as pd
+import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import pandas as pd
 
 from src.config import (
     DIR_PROCESSED,
     PROJECT_ROOT,
-    STATISTICAL_ALPHA
+    STATISTICAL_ALPHA,
+    TEST_STORY,
 )
-import time
-from src.db_manager import log_execution_time
+from src.db_manager import log_execution_time, save_dataframe_to_table
+
 
 RESULTS_IN_DIR = DIR_PROCESSED / "results_voxelwise"
 REPORTS_OUT_DIR = PROJECT_ROOT / "data" / "processed" / "reports" / "statistical"
 
-# =============================================================================
-# UMBRALES BASADOS EN LITERATURA FMRI NATURALISTA
-# =============================================================================
-# Puedes ajustar estos valores si los revisores te piden criterios más estrictos.
 
-# Umbrales para Varianza Única Explicada (Delta R2 medio en vóxeles significativos)
-# 0.01 significa que la característica explica un 1% extra de varianza sobre el ruido base.
-EFFECT_SIZE_MODERATE = 0.01  # Típico en fMRI naturalista
-EFFECT_SIZE_STRONG = 0.05    # Alto/Fuerte para un solo rasgo lingüístico
-
-# Umbrales para Extensión Espacial (% de la corteza escaneada)
-SPATIAL_FOCAL = 1.0     # Efecto altamente localizado (ej. solo giro temporal superior)
-SPATIAL_EXTENDED = 5.0  # Efecto distribuido moderado
-SPATIAL_MASSIVE = 15.0  # Efecto masivo (Poco común para rasgos gramaticales específicos)
-
-
-def evaluate_effect_size(mean_delta_r2: float) -> str:
-    """Evalúa el tamaño del efecto (Delta R2) basándose en umbrales estándar.
+def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float, str]]:
+    """Calcula las métricas estadísticas a los 3 niveles requeridos por el anteproyecto.
     
-    Args:
-        mean_delta_r2 (float): Promedio de Delta R2 en vóxeles significativos.
-        
-    Returns:
-        str: Párrafo interpretativo del tamaño del efecto.
-    """
-    if mean_delta_r2 == 0.0:
-        return "Nulo. No se detectó varianza única explicada."
-    elif mean_delta_r2 < EFFECT_SIZE_MODERATE:
-        return (
-            "Débil / Marginal. Es un efecto sutil, completamente esperable en "
-            "paradigmas de fMRI naturalista (historias), pero se encuentra en el límite "
-            "inferior de detectabilidad."
-        )
-    elif mean_delta_r2 < EFFECT_SIZE_STRONG:
-        return (
-            "Moderado / Típico. El tamaño del efecto es robusto y se alinea perfectamente "
-            "con los estándares de la literatura de Voxelwise Encoding Models."
-        )
-    else:
-        return (
-            "Fuerte. Un efecto notablemente alto para una sola característica lingüística. "
-            "Sugiere una fuerte sintonización cortical hacia el tiempo gramatical."
-        )
-
-
-def evaluate_spatial_extent(perc_sig: float) -> str:
-    """Evalúa la extensión espacial del efecto en la corteza total.
-    
-    Args:
-        perc_sig (float): Porcentaje de vóxeles significativos.
-        
-    Returns:
-        str: Párrafo interpretativo de la extensión cortical.
-    """
-    if perc_sig == 0.0:
-        return "Ausente. El modelo no logró predecir la actividad cortical por encima del azar."
-    elif perc_sig < SPATIAL_FOCAL:
-        return (
-            "Altamente Focalizado. El procesamiento del tiempo gramatical está restringido "
-            "a poblaciones neuronales muy específicas (sugiere especialización regional estricta)."
-        )
-    elif perc_sig < SPATIAL_EXTENDED:
-        return (
-            "Focalizado a Moderado. Sugiere que el procesamiento ocurre en regiones locales "
-            "clásicas del lenguaje sin reclutar redes de dominio general."
-        )
-    elif perc_sig < SPATIAL_MASSIVE:
-        return (
-            "Extendido / Distribuido. El efecto abarca múltiples áreas corticales, sugiriendo "
-            "una red distribuida para el procesamiento morfosintáctico continuo."
-        )
-    else:
-        return (
-            "Masivo / Global. Altamente inusual para una característica tan específica. "
-            "Recomendación metodológica: Revisar si existe colinealidad con características "
-            "acústicas (como la intensidad del audio) o semánticas generales."
-        )
-
-
-def generate_subject_report(df: pd.DataFrame, subject_id: str) -> Tuple[str, Dict]:
-    """Calcula estadísticas para un sujeto y redacta su interpretación.
-    
-    Args:
-        df (pd.DataFrame): DataFrame con resultados de Ridge.
-        subject_id (str): Identificador del sujeto.
-        
-    Returns:
-        Tuple[str, Dict]: 
-            - Texto en formato Markdown con el reporte del sujeto.
-            - Diccionario con los estadísticos calculados para el reporte grupal.
+    1. Desempeño global (R2_global).
+    2. Distribución continua de Delta R2 en la totalidad de la corteza.
+    3. Métricas en vóxeles significativos tras FDR (o 'N/A' si no hay ninguno).
     """
     total_voxels = len(df)
+    r2_global = df['r2_global'].values
+    delta_r2 = df['delta_r2_tense'].values
+    p_fdr = df['p_value_fdr'].values
     
-    # Filtro de falsos positivos (False Discovery Rate)
-    sig_mask = df['p_value_fdr'] < STATISTICAL_ALPHA
-    sig_voxels = int(sig_mask.sum())
-    perc_sig = (sig_voxels / total_voxels) * 100
+    # 1. Nivel Global (R2)
+    r2_global_positive_pct = float(np.mean(r2_global > 0) * 100)
+    r2_global_median = float(np.median(r2_global))
+    r2_global_max = float(np.max(r2_global))
     
-    # Cálculos de varianza (Solo en vóxeles donde hubo significancia)
+    # 2. Nivel Distribución Completa Delta R2 (Todos los vóxeles)
+    delta_median = float(np.median(delta_r2))
+    q25, q75 = np.percentile(delta_r2, [25, 75])
+    delta_iqr = float(q75 - q25)
+    delta_p5 = float(np.percentile(delta_r2, 5))
+    delta_p95 = float(np.percentile(delta_r2, 95))
+    delta_min = float(np.min(delta_r2))
+    delta_max = float(np.max(delta_r2))
+    delta_pos_pct = float(np.mean(delta_r2 > 0) * 100)
+    
+    # 3. Nivel Vóxeles Significativos (FDR < 0.05)
+    sig_mask = p_fdr < STATISTICAL_ALPHA
+    sig_voxels = int(np.sum(sig_mask))
+    sig_pct = float((sig_voxels / total_voxels) * 100)
+    
+    # Decisión metodológica: Si no hay vóxeles significativos, reportar como 'N/A'
+    # para no confundir la falta de potencia estadística con un Delta R2 de 0.0 exacto.
     if sig_voxels > 0:
-        mean_delta_r2 = float(df.loc[sig_mask, 'delta_r2_tense'].mean())
-        max_delta_r2 = float(df.loc[sig_mask, 'delta_r2_tense'].max())
+        sig_delta_mean = f"{float(np.mean(delta_r2[sig_mask])):.5f}"
+        sig_delta_median = f"{float(np.median(delta_r2[sig_mask])):.5f}"
+        sig_delta_max = f"{float(np.max(delta_r2[sig_mask])):.5f}"
     else:
-        mean_delta_r2 = 0.0
-        max_delta_r2 = 0.0
-
-    # Generación de interpretaciones condicionales
-    spatial_interp = evaluate_spatial_extent(perc_sig)
-    effect_interp = evaluate_effect_size(mean_delta_r2)
-
-    # Redacción del manuscrito (f-string)
-    md_text = f"### Participant: {subject_id}\n\n"
-    md_text += f"- **Corteza Analizada:** {total_voxels:,} vóxeles totales.\n"
-    md_text += f"- **Vóxeles Significativos (FDR < {STATISTICAL_ALPHA}):** {sig_voxels:,} vóxeles.\n"
-    md_text += f"- **Extensión Espacial:** {perc_sig:.2f}%. *Interpretación:* {spatial_interp}\n"
-    md_text += f"- **Varianza Única Media ($\\Delta R^2$):** {mean_delta_r2:.4f}. *Interpretación:* {effect_interp}\n"
-    md_text += f"- **Pico Máximo de Varianza (Max $\\Delta R^2$):** {max_delta_r2:.4f} (Este es el vóxel que mejor codifica el tiempo gramatical en este sujeto).\n\n"
-
-    # Diccionario para retorno
-    stats = {
-        'subject_id': subject_id,
-        'total_voxels': total_voxels,
-        'sig_voxels': sig_voxels,
-        'perc_sig': perc_sig,
-        'mean_delta_r2': mean_delta_r2
-    }
-    
-    return md_text, stats
-
-
-def generate_group_report(all_stats: List[Dict]) -> str:
-    """Calcula el consenso muestral a partir de las estadísticas individuales.
-    
-    Nota: Se aclara explícitamente en el reporte que es descriptivo debido al n pequeño.
-    
-    Args:
-        all_stats (List[Dict]): Lista de diccionarios con estadísticas por sujeto.
+        sig_delta_mean = "N/A"
+        sig_delta_median = "N/A"
+        sig_delta_max = "N/A"
         
-    Returns:
-        str: Texto en formato Markdown con el consenso grupal.
-    """
-    n_subjects = len(all_stats)
-    
-    # Contamos cuántos sujetos mostraron al menos 0.1% de la corteza activa 
-    # (Filtro para considerar que el efecto existe y no es un artefacto de 1 o 2 vóxeles perdidos)
-    subjects_with_effects = sum(1 for s in all_stats if s['perc_sig'] >= 0.1)
-    
-    avg_perc_sig = sum(s['perc_sig'] for s in all_stats) / n_subjects
-    
-    # Promedio del tamaño de efecto solo tomando sujetos donde sí hubo efecto
-    valid_r2s = [s['mean_delta_r2'] for s in all_stats if s['mean_delta_r2'] > 0]
-    avg_mean_delta_r2 = sum(valid_r2s) / len(valid_r2s) if valid_r2s else 0.0
+    return {
+        'total_voxels': total_voxels,
+        'r2_global_median': r2_global_median,
+        'r2_global_max': r2_global_max,
+        'r2_global_positive_pct': r2_global_positive_pct,
+        'delta_median': delta_median,
+        'delta_iqr': delta_iqr,
+        'delta_p5': delta_p5,
+        'delta_p95': delta_p95,
+        'delta_min': delta_min,
+        'delta_max': delta_max,
+        'delta_positive_pct': delta_pos_pct,
+        'sig_voxels_count': sig_voxels,
+        'sig_voxels_pct': sig_pct,
+        'sig_delta_mean': sig_delta_mean,
+        'sig_delta_median': sig_delta_median,
+        'sig_delta_max': sig_delta_max
+    }
 
-    md_text = "## Sample-Level Consensus (Descriptivo)\n\n"
-    md_text += f"> **Nota Metodológica sobre Tamaño Muestral:** Debido a la naturaleza intensiva de la recolección de datos fMRI naturalistas (múltiples horas de escaneo por participante), el tamaño de la muestra (*n*={n_subjects}) es estadísticamente modesto. Por lo tanto, el siguiente reporte grupal representa una caracterización muestral cualitativa de consistencia, y no una inferencia poblacional estricta (Random Effects).\n\n"
+
+def generate_subject_markdown(metrics: Dict, subject_id: str) -> str:
+    """Genera la sección individual del manuscrito en formato Markdown."""
+    sig_count = metrics['sig_voxels_count']
+    sig_pct = metrics['sig_voxels_pct']
     
-    md_text += f"- **Consistencia de Detección:** Se encontraron representaciones significativas del tiempo gramatical en **{subjects_with_effects} de {n_subjects}** participantes estudiados.\n"
-    md_text += f"- **Extensión Promedio:** A través de la cohorte, el rasgo activa en promedio un **{avg_perc_sig:.2f}%** de la corteza medida.\n"
-    md_text += f"- **Tamaño de Efecto Promedio:** La varianza única media extraída globalmente es de **$\\Delta R^2$ = {avg_mean_delta_r2:.4f}**.\n\n"
+    md = f"### Participante: {subject_id}\n\n"
+    md += f"- **Volumen Cortical Analizado:** {metrics['total_voxels']:,} vóxeles.\n"
+    md += (
+        f"- **Desempeño del Modelo Global (43 características):** "
+        f"Mediana $R^2 = {metrics['r2_global_median']:.4f}$, "
+        f"Máximo $R^2 = {metrics['r2_global_max']:.4f}$ "
+        f"({metrics['r2_global_positive_pct']:.2f}% de vóxeles con ajuste positivo).\n"
+    )
+    md += (
+        f"- **Distribución de $\\Delta R^2$ en Toda la Corteza:** "
+        f"Mediana = {metrics['delta_median']:.5f}, "
+        f"IQR = {metrics['delta_iqr']:.5f}, "
+        f"Percentil 5 = {metrics['delta_p5']:.5f}, "
+        f"Percentil 95 = {metrics['delta_p95']:.5f}, "
+        f"Rango = [{metrics['delta_min']:.5f}, {metrics['delta_max']:.5f}], "
+        f"Vóxeles con $\\Delta R^2 > 0$ = {metrics['delta_positive_pct']:.2f}%.\n"
+    )
+    md += (
+        f"- **Vóxeles Significativos (FDR Benjamini-Hochberg $q < {STATISTICAL_ALPHA}$):** "
+        f"{sig_count:,} vóxeles ({sig_pct:.2f}% de la corteza).\n"
+    )
     
-    return md_text
+    if sig_count > 0:
+        md += (
+            f"  - *Aporte en vóxeles significativos:* Media $\\Delta R^2 = {metrics['sig_delta_mean']}$, "
+            f"Mediana $\\Delta R^2 = {metrics['sig_delta_median']}$, "
+            f"Pico Máximo $\\Delta R^2 = {metrics['sig_delta_max']}$.\n"
+        )
+    else:
+        md += (
+            f"  - *Aporte en vóxeles significativos:* **N/A** (Ningún vóxel superó el criterio corregido). "
+            f"Bajo la configuración implementada, no se identificó un aporte predictivo separable "
+            f"de los 5 espacios de control para la historia '{TEST_STORY}'.\n"
+        )
+        
+    md += "\n"
+    return md
 
 
 def run_statistical_interpretation() -> None:
-    """Orquesta la lectura, análisis y exportación del reporte estadístico."""
+    """Orquesta el análisis cuantitativo y la exportación de reportes."""
     REPORTS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     
-    parquet_files = list(RESULTS_IN_DIR.glob("*_voxelwise_results.parquet"))
-    
+    parquet_files = sorted(list(RESULTS_IN_DIR.glob("*_voxelwise_results.parquet")))
     if not parquet_files:
         print(f"Error: No se encontraron resultados parquet en {RESULTS_IN_DIR}.")
         return
         
-    print(f"Iniciando interpretación estadística para {len(parquet_files)} sujetos...")
+    print(f"Iniciando interpretación estadística formal para {len(parquet_files)} participantes...")
     
-    manuscript_content = "# Statistical Interpretation Report\n"
-    manuscript_content += "Generado automáticamente por el Pipeline de Voxelwise Encoding.\n\n"
-    manuscript_content += "## Single-Subject Level Analysis\n\n"
+    summary_records = []
+    markdown_content = "# Reporte de Interpretación Estadística del Modelo VEM\n\n"
+    markdown_content += (
+        "**Estudio:** Contribución predictiva del tiempo gramatical finito a la señal BOLD "
+        "durante la comprensión de habla naturalista continua.\n\n"
+    )
+    markdown_content += "## 1. Análisis a Nivel de Participante Individual\n\n"
     
-    all_subject_stats = []
-    
-    # Procesamiento por sujeto
-    for file_path in sorted(parquet_files):
-        # Extraer el sub-id (ej. de 'sub-UTS01_voxelwise_results.parquet')
+    for file_path in parquet_files:
         subject_id = file_path.name.split('_voxelwise')[0]
-        
         try:
             df = pd.read_parquet(file_path)
-            md_text, stats = generate_subject_report(df, subject_id)
+            metrics = calculate_voxelwise_metrics(df)
+            metrics['subject_id'] = subject_id
+            summary_records.append(metrics)
             
-            manuscript_content += md_text
-            all_subject_stats.append(stats)
+            md_subject = generate_subject_markdown(metrics, subject_id)
+            markdown_content += md_subject
             
-            # También lo imprimimos en consola para retroalimentación inmediata
-            print(f"\n--- {subject_id} ---")
-            print(f"Vóxeles Sig: {stats['sig_voxels']}/{stats['total_voxels']} ({stats['perc_sig']:.2f}%)")
-            print(f"Delta R2 Medio: {stats['mean_delta_r2']:.4f}")
-            
+            print(f"[{subject_id}] FDR Sig: {metrics['sig_voxels_count']} ({metrics['sig_voxels_pct']:.2f}%) | "
+                  f"Delta R2 Mediana: {metrics['delta_median']:.5f} | "
+                  f"Sig Delta Media: {metrics['sig_delta_mean']}")
+                  
         except Exception as e:
-            print(f"Error procesando estadísticas para {subject_id}: {str(e)}")
+            print(f"[ERROR] Procesando participante {subject_id}: {str(e)}")
 
-    # Procesamiento Grupal
-    if all_subject_stats:
-        group_md_text = generate_group_report(all_subject_stats)
-        manuscript_content += group_md_text
+    # 2. Resumen Muestral Descriptivo (Consistencia entre participantes)
+    df_summary = pd.DataFrame(summary_records)
+    
+    n_subj = len(df_summary)
+    subj_with_effects = sum(1 for r in summary_records if r['sig_voxels_count'] > 0)
+    
+    markdown_content += "## 2. Caracterización Descriptiva de la Muestra\n\n"
+    markdown_content += (
+        "> **Nota Metodológica:** Los resultados grupales constituyen una síntesis descriptiva "
+        "de consistencia en la muestra analizada y no una inferencia poblacional de efectos aleatorios.\n\n"
+    )
+    markdown_content += (
+        f"- **Consistencia Muestral:** {subj_with_effects} de {n_subj} participantes presentaron "
+        f"vóxeles donde el tiempo gramatical superó la corrección FDR ($q < {STATISTICAL_ALPHA}$).\n"
+    )
+    markdown_content += (
+        f"- **Desempeño Promedio del Modelo Global:** Mediana $R^2 = {df_summary['r2_global_median'].mean():.4f}$, "
+        f"con un promedio de {df_summary['r2_global_positive_pct'].mean():.2f}% de vóxeles con ajuste positivo.\n"
+    )
+    markdown_content += (
+        f"- **Distribución de $\\Delta R^2$ Muestral:** Mediana transversal = {df_summary['delta_median'].mean():.5f}, "
+        f"Proporción de vóxeles con $\\Delta R^2 > 0$ = {df_summary['delta_positive_pct'].mean():.2f}%.\n"
+    )
+    
+    # 3. Exportación de artefactos
+    report_md_file = REPORTS_OUT_DIR / "statistical_interpretation_report.md"
+    report_csv_file = REPORTS_OUT_DIR / "statistical_summary_table.csv"
+    
+    with open(report_md_file, 'w', encoding='utf-8') as f:
+        f.write(markdown_content)
         
-        # Guardado en disco
-        report_file = REPORTS_OUT_DIR / "statistical_manuscript_draft.md"
-        with open(report_file, 'w', encoding='utf-8') as f:
-            f.write(manuscript_content)
-            
-        print(f"\n[ÉXITO] Reporte Markdown exportado en: {report_file}")
-        print("Puedes abrir este archivo en VSCode/Typora y copiar el contenido a LaTeX/Word.")
+    df_summary.to_csv(report_csv_file, index=False)
+    save_dataframe_to_table(df_summary, 'audit_statistical_summary')
+    
+    print(f"\n[ÉXITO] Reporte Markdown exportado en: {report_md_file.name}")
+    print(f"[ÉXITO] Tabla resumen exportada en CSV y persistida en SQLite.")
 
 
 if __name__ == "__main__":

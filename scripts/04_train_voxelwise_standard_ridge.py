@@ -1,9 +1,9 @@
 # scripts/04_train_voxelwise_standard_ridge.py
-#*
-"""
-Orquestador de Entrenamiento a Nivel de Sujeto (Enfoque Primal / Estándar).
-Implementa extracción, ensamblaje y modelamiento de la matriz fMRI, delegando
-el procesamiento al estimador por lotes para preservar los límites de RAM (WSL).
+"""Orquestador de Entrenamiento a Nivel de Sujeto (Ridge Estándar / Primal).
+
+Implementa extracción, ensamblaje, estandarización independiente por sesión,
+promedio temporal de repeticiones BOLD en prueba y ajuste vóxel a vóxel
+mediante procesamiento espacial por lotes para preservar los límites de RAM.
 Mantiene política estricta de punto de control (checkpointing).
 """
 
@@ -11,7 +11,7 @@ import gc
 import multiprocessing
 import os
 import time
-from typing import Tuple
+from typing import Optional, Tuple
 
 # Decisión técnica: Asegura que el backend en C subyacente (OpenBLAS/MKL)
 # vectorice las operaciones matemáticas ocupando el 100% de la CPU lógica.
@@ -29,9 +29,9 @@ import pandas as pd
 from src.config import (
     DIR_FEATURES_FMRI_TR,
     DIR_PROCESSED,
-    N_PERMUTATIONS,
     SPACES_DIMENSIONS,
     TEST_STORY,
+    TOTAL_FEATURES_COUNT,
     VOXEL_BATCH_SIZE,
 )
 from src.data_loader import load_fmri_data
@@ -44,22 +44,22 @@ RESULTS_OUT_DIR = DIR_PROCESSED / "results_voxelwise"
 
 
 def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
-    """Ensambla matrices predictoras (X) y de respuesta (Y) concatenando historias.
+    """Ensambla las matrices de entrenamiento y evaluación fuera de muestra.
     
-    Aplica una conversión estricta a float32 desde la carga, reduciendo el 
-    peso en memoria a la mitad, y aplica estandarización (Z-score) por historia 
-    para neutralizar las fluctuaciones de la línea base del escáner fMRI.
+    Aplica una conversión estricta a float32 y estandarización (Z-score) 
+    independiente por sesión para neutralizar las fluctuaciones de línea base del escáner.
+    Para la historia reservada ('wheretheressmoke'), promedia temporalmente las 
+    repeticiones BOLD estandarizadas para maximizar la relación señal-ruido (SNR).
     
     Args:
-        subject_sessions (pd.DataFrame): Filas del registro de auditoría 
-            correspondientes al sujeto.
+        subject_sessions (pd.DataFrame): Registros de auditoría del participante.
         
     Returns:
-        Tuple: (x_train, y_train, x_test, y_test). Retorna (None, None, None, None)
-            si faltan archivos o datos.
+        Tuple: (x_train, y_train, x_test, y_test, story_ids_train). Retorna Nones si faltan datos.
     """
-    x_train_list, y_train_list = [], []
-    x_test, y_test = None, None
+    x_train_list, y_train_list, story_ids_list = [], [], []
+    test_bold_runs = []
+    x_test = None
     
     for _, row in subject_sessions.iterrows():
         story = row['story']
@@ -74,11 +74,11 @@ def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
         if y_data is None:
             continue
             
-        # Decisión técnica: Coerción inmediata a precisión simple.
+        # Coerción inmediata a precisión simple para reducir el peso en RAM al 50%
         x_data = pd.read_parquet(feature_path).values.astype(np.float32)
         y_data = y_data.astype(np.float32)
         
-        # Truncado de seguridad para emparejar diferencias mínimas de adquisición (TR)
+        # Truncado de seguridad para emparejar posibles discrepancias mínimas de TR
         min_samples = min(x_data.shape[0], y_data.shape[0])
         x_data = x_data[:min_samples, :]
         y_data = y_data[:min_samples, :]
@@ -86,16 +86,16 @@ def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
         # Decisión técnica: Z-scoring INDEPENDIENTE POR SESIÓN/HISTORIA.
         # El escáner fMRI no tiene un cero absoluto y la línea base "flota" entre sesiones.
         # Si no se estandariza cada historia por separado antes de concatenarlas,
-        # el modelo Ridge intentará predecir los saltos abruptos entre sesiones y fallará (R2 < 0).
+        # el modelo Ridge intentará predecir los saltos abruptos entre sesiones y fallará.
         
-        # Estandarización de características (X)
+        # Estandarización de características predictoras (X)
         x_data = np.nan_to_num(x_data, nan=0.0)
         x_mean = x_data.mean(axis=0)
         x_std = x_data.std(axis=0)
         x_std[x_std == 0] = 1.0
         x_data = (x_data - x_mean) / x_std
         
-        # Estandarización de la señal fMRI (Y)
+        # Estandarización de la serie temporal BOLD (Y)
         y_data = np.nan_to_num(y_data, nan=0.0)
         y_mean = y_data.mean(axis=0)
         y_std = y_data.std(axis=0)
@@ -103,37 +103,47 @@ def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
         y_data = (y_data - y_mean) / y_std
         
         if story == TEST_STORY:
-            if x_test is None: 
-                x_test, y_test = x_data, y_data
+            test_bold_runs.append(y_data)
+            if x_test is None:
+                x_test = x_data
         else:
             x_train_list.append(x_data)
             y_train_list.append(y_data)
+            story_ids_list.append(np.full(min_samples, story))
             
-    if not x_train_list or x_test is None:
-        return None, None, None, None
+    if not x_train_list or not test_bold_runs or x_test is None:
+        return None, None, None, None, None
         
-    # Ensamblaje final
+    # Ensamblaje de Entrenamiento
     x_train_full = np.vstack(x_train_list)
     y_train_full = np.vstack(y_train_list)
+    story_ids_train = np.concatenate(story_ids_list)
     
-    # Decisión técnica: Liberar listas inmediatamente de la memoria para evitar duplicidad.
-    del x_train_list, y_train_list
+    # Decisión metodológica del anteproyecto: Promedio temporal de repeticiones de prueba
+    # Se calcula el promedio elemento a elemento de las matrices BOLD estandarizadas de test
+    # para atenuar el ruido fisiológico no sincronizado con el estímulo.
+    if len(test_bold_runs) > 1:
+        # Asegurar longitud común entre repeticiones de prueba si difirieran por 1 TR
+        min_test_len = min(run.shape[0] for run in test_bold_runs)
+        test_bold_trimmed = [run[:min_test_len, :] for run in test_bold_runs]
+        y_test_avg = np.mean(test_bold_trimmed, axis=0, dtype=np.float32)
+        x_test = x_test[:min_test_len, :]
+    else:
+        y_test_avg = test_bold_runs[0]
+        
+    del x_train_list, y_train_list, test_bold_runs
     gc.collect()
     
-    return x_train_full, y_train_full, x_test, y_test
+    return x_train_full, y_train_full, x_test, y_test_avg, story_ids_train
+
 
 def run_subject_level_modeling() -> None:
-    """Orquesta el ajuste de modelos por participante con punto de control.
-    
-    Itera de forma ordenada sobre los sujetos, carga los datos transformados 
-    en el espacio primal y delega la estimación por lotes para preservar RAM.
-    Aplica liberación de memoria estricta al finalizar cada participante.
-    """
+    """Orquesta el ajuste de modelos por participante con punto de control."""
     RESULTS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     
     df_sessions = load_table_to_dataframe('audit_sessions')
     if df_sessions is None or df_sessions.empty:
-        print("Error: No se encontró la tabla 'audit_sessions'.")
+        print("Error: No se encontró la tabla 'audit_sessions'. Ejecute 01a primero.")
         return
         
     subjects = sorted(df_sessions['subject_id'].unique())
@@ -141,24 +151,26 @@ def run_subject_level_modeling() -> None:
     
     for subject_id in subjects:
         start_time = time.time()
-        print(f"\n--- Procesando Participante: {subject_id} ---")
+        print(f"\n=================================================================")
+        print(f"PROCESANDO PARTICIPANTE: {subject_id}")
+        print(f"=================================================================")
         
         subject_out_file = RESULTS_OUT_DIR / f"{subject_id}_voxelwise_results.parquet"
         if subject_out_file.exists():
-            print(f"[OMITIDO] El participante {subject_id} ya fue procesado.")
+            print(f"[OMITIDO] El participante {subject_id} ya fue procesado previamente.")
             continue
             
         subject_records = df_sessions[df_sessions['subject_id'] == subject_id]
         print(f"Ensamblando matrices para {len(subject_records)} sesiones...")
         
-        x_tr, y_tr, x_te, y_te = build_matrices(subject_records)
+        x_tr, y_tr, x_te, y_te, story_ids = build_matrices(subject_records)
         if x_tr is None:
-            print(f"[ERROR] Datos insuficientes para partición en {subject_id}.")
+            print(f"[ERROR] Datos insuficientes para partición Train/Test en {subject_id}.")
             continue
             
-        print(f"Entrenamiento: X={x_tr.shape}, Y={y_tr.shape} (Primal)")
-        print(f"Evaluación: X={x_te.shape}, Y={y_te.shape}")
-        print(f"Iniciando estimación por lotes ({N_PERMUTATIONS} permutaciones)...")
+        print(f"Entrenamiento: X={x_tr.shape} (43 predictores), Y={y_tr.shape}")
+        print(f"Evaluación (Promedio SNR): X={x_te.shape}, Y={y_te.shape}")
+        print(f"Historias en entrenamiento: {len(np.unique(story_ids))} narraciones para Story-Blocked CV.")
         
         try:
             df_results = encoder.fit_and_evaluate(
@@ -166,27 +178,27 @@ def run_subject_level_modeling() -> None:
                 y_train=y_tr, 
                 x_test=x_te, 
                 y_test=y_te, 
-                n_permutations=N_PERMUTATIONS,
+                story_ids_train=story_ids,
                 batch_size=VOXEL_BATCH_SIZE
             )
             
+            # Persistencia atómica de resultados
             df_results.to_parquet(subject_out_file, engine='pyarrow', index=False)
             print(f"[ÉXITO] Resultados persistidos en {subject_out_file.name}")
             
         except Exception as e:
-            print(f"[ERROR] Fallo modelando al sujeto {subject_id}: {str(e)}")
+            print(f"[ERROR CRÍTICO] Falló el modelamiento para {subject_id}: {str(e)}")
             
         finally:
-            # Limpieza de memoria
-            del x_tr, y_tr, x_te, y_te
+            del x_tr, y_tr, x_te, y_te, story_ids
             if 'df_results' in locals():
                 del df_results
             gc.collect()
             
             elapsed = time.time() - start_time
-            log_execution_time("04b_standard_ridge", elapsed, subject_id)
-            
+            log_execution_time("04_standard_ridge", elapsed, subject_id)
+
 
 if __name__ == "__main__":
-    print(f"Iniciando pipeline. OpenBLAS configurado para usar {TOTAL_CORES} hilos lógicos.")
+    print(f"Iniciando pipeline VEM. OpenBLAS configurado para usar {TOTAL_CORES} hilos lógicos.")
     run_subject_level_modeling()

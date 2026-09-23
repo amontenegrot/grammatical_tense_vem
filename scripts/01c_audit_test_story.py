@@ -1,74 +1,84 @@
 # scripts/01c_audit_test_story.py
 """Orquestador de Auditoría de la Historia de Prueba.
 
-Analiza la disponibilidad y frecuencia de la historia candidata para evaluación 
-(test set) en cada participante de la cohorte. Garantiza que el conjunto de 
-evaluación sea metodológicamente viable.
+Analiza la disponibilidad, sesiones, corridas y repeticiones de la historia 
+de evaluación fuera de muestra ('wheretheressmoke') por participante.
+Documenta formalmente el desbalance lingüístico (303 formas finitas: 20.13% pasado vs 79.87% no pasado)
+y la base para el promedio temporal de repeticiones BOLD.
 """
 
-import pandas as pd
 import time
-from src.db_manager import save_dataframe_to_table, log_execution_time, load_table_to_dataframe
+import pandas as pd
+
 from src.config import TEST_STORY
+from src.db_manager import load_table_to_dataframe, log_execution_time, save_dataframe_to_table
+
+
+# Métricas documentadas en la auditoría lingüística formal del anteproyecto
+TEST_STORY_LINGUISTIC_PROFILE = {
+    'story': TEST_STORY,
+    'total_finite_forms': 303,
+    'past_forms_count': 61,
+    'past_forms_pct': 20.13,
+    'non_past_forms_count': 242,
+    'non_past_forms_pct': 79.87,
+    'note': 'Predominio no pasado; reservada para evaluación con promedio temporal de repeticiones'
+}
 
 
 def audit_test_story(test_story: str = TEST_STORY) -> None:
-    """Evalúa la viabilidad de una historia como conjunto de prueba.
-    
-    Extrae la tabla de sesiones de la base de datos SQLite y genera un reporte 
-    detallado de las reproducciones por participante. Identifica carencias 
-    de datos que puedan comprometer la validación cruzada.
-    
-    Args:
-        test_story (str, opcional): Nombre de la historia a auditar. 
-            Por defecto toma la variable centralizada TEST_STORY.
-    """
+    """Evalúa la viabilidad metodológica y repeticiones de la historia de prueba."""
     df_sessions = load_table_to_dataframe('audit_sessions')
     
     if df_sessions is None or df_sessions.empty:
-        print("Error: No se encontró la tabla 'audit_sessions'.")
+        print("Error: No se encontró la tabla 'audit_sessions'. Ejecute 01a primero.")
         return
         
-    print(f"\n--- AUDITORÍA DE HISTORIA DE PRUEBA: '{test_story}' ---")
+    print(f"\n=================================================================")
+    print(f"AUDITORÍA DE LA HISTORIA DE EVALUACIÓN FUERA DE MUESTRA: '{test_story}'")
+    print(f"=================================================================")
     
-    # 1. Filtramos solo las sesiones donde se escuchó la historia objetivo
+    # 1. Filtrar sesiones correspondientes a la historia de prueba
     df_test = df_sessions[df_sessions['story'] == test_story]
     
     if df_test.empty:
-        print(f"[ALERTA CRÍTICA] Ningún participante escuchó '{test_story}'.")
+        print(f"[ALERTA CRÍTICA] Ningún participante tiene registros para '{test_story}'.")
         return
         
-    # 2. Contamos cuántas veces la escuchó cada sujeto
-    play_counts = df_test.groupby('subject_id').size().reset_index(name='play_count')
+    # 2. Conteo de presentaciones / repeticiones por participante
+    play_counts = df_test.groupby('subject_id').agg(
+        presentations_count=('run_id', 'count'),
+        sessions_list=('session_id', lambda x: ", ".join(sorted(x.unique()))),
+        runs_list=('run_id', lambda x: ", ".join(x))
+    ).reset_index()
     
-    # 3. Cruzamos con la lista total de sujetos
-    all_subjects = df_sessions['subject_id'].unique()
+    all_subjects = sorted(df_sessions['subject_id'].unique())
     df_all_subjects = pd.DataFrame({'subject_id': all_subjects})
     
     report = pd.merge(df_all_subjects, play_counts, on='subject_id', how='left')
-    report['play_count'] = report['play_count'].fillna(0).astype(int)
+    report['presentations_count'] = report['presentations_count'].fillna(0).astype(int)
     
-    # 4. Impresión del reporte analítico
-    print("\nFrecuencia de escucha por participante:")
-    print(report.to_string(index=False))
+    print("\nDisponibilidad de presentaciones por participante:")
+    print(report[['subject_id', 'presentations_count', 'sessions_list']].to_string(index=False))
     
-    # 5. Diagnóstico de viabilidad
-    subjects_with_zero = report[report['play_count'] == 0]['subject_id'].tolist()
+    # 3. Diagnóstico de repeticiones para SNR Boosting (Promedio Temporal)
+    single_rep = report[report['presentations_count'] == 1]
+    multi_rep = report[report['presentations_count'] > 1]
     
-    print("\n--- DIAGNÓSTICO METODOLÓGICO ---")
-    if subjects_with_zero:
-        print(f"[CUIDADO] Los siguientes sujetos NO escucharon la historia: {subjects_with_zero}")
-        print("No podrá evaluar el modelo (Test Set) en estos participantes usando esta historia.")
-    else:
-        print("[VIABILIDAD CONFIRMADA] Todos los participantes escucharon la historia al menos una vez.")
-        
-    avg_plays = report['play_count'].mean()
-    print(f"Promedio de reproducciones por participante: {avg_plays:.2f}")
+    print("\n--- DIAGNÓSTICO METODOLÓGICO DE SNR ---")
+    print(f"Participantes con repeticiones múltiples (Permiten promedio de señal BOLD): {len(multi_rep)}")
+    print(f"Participantes con presentación única: {len(single_rep)}")
     
-    multiple_plays = report[report['play_count'] > 1]
-    if not multiple_plays.empty:
-        print("\nParticipantes con presentaciones repetidas (Útiles para calcular el Noise Ceiling):")
-        print(multiple_plays.to_string(index=False))
+    # 4. Registro formal del perfil lingüístico de la historia de prueba
+    df_profile = pd.DataFrame([TEST_STORY_LINGUISTIC_PROFILE])
+    save_dataframe_to_table(report, 'audit_test_story_coverage')
+    save_dataframe_to_table(df_profile, 'audit_test_story_linguistic_profile')
+    
+    print("\n--- PERFIL LINGÜÍSTICO DOCUMENTADO (Anteproyecto) ---")
+    print(f"Formas finitas totales: {TEST_STORY_LINGUISTIC_PROFILE['total_finite_forms']}")
+    print(f"Pasado: {TEST_STORY_LINGUISTIC_PROFILE['past_forms_count']} ({TEST_STORY_LINGUISTIC_PROFILE['past_forms_pct']}%)")
+    print(f"No Pasado: {TEST_STORY_LINGUISTIC_PROFILE['non_past_forms_count']} ({TEST_STORY_LINGUISTIC_PROFILE['non_past_forms_pct']}%)")
+    print("Nota: El desbalance será considerado formalmente en la interpretación de los escenarios de resultado.")
 
 
 if __name__ == "__main__":

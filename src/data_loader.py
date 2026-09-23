@@ -1,5 +1,4 @@
 # src/data_loader.py
-#*
 """Módulo de carga de datos fMRI.
 
 Maneja la lectura eficiente de archivos espaciales HDF5, asegurando un bajo 

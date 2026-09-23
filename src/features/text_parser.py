@@ -1,5 +1,4 @@
 # src/features/text_parser.py
-#*
 """Módulo de reconstrucción y alineación de texto.
 
 Provee utilidades para convertir transcripciones fragmentadas de TextGrid 

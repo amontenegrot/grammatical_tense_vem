@@ -1,5 +1,4 @@
 # src/db_manager.py
-#*
 """Módulo de gestión de base de datos.
 
 Maneja conexiones a SQLite asegurando prácticas seguras para subprocesos,

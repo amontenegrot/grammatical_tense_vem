@@ -1,10 +1,9 @@
 # src/features/extractors.py
-#*
 """Módulo de extractores de características.
 
 Implementa las reglas de transformación para proyectar propiedades acústicas 
-y lingüísticas en matrices temporales continuas a alta resolución.
-Incluye la actualización para la proyección del espacio léxico-semántico latente (LSA).
+y lingüísticas en matrices temporales continuas a alta resolución (100 Hz).
+Garantiza una arquitectura de exactamente 43 columnas (39 control + 4 de interés).
 """
 
 import re
@@ -26,7 +25,7 @@ from src.config import (
 
 
 class PhonologicalExtractor:
-    """Extractor del espacio de características fonético-fonológicas."""
+    """Extractor del espacio de características fonético-fonológicas (14 rasgos)."""
     
     FEATURE_NAMES: List[str] = [
         'vocalic', 'consonantal', 'voiceless', 'voiced', 'bilabial', 
@@ -67,15 +66,7 @@ class PhonologicalExtractor:
     }
 
     def _process_token(self, raw_token: str) -> List[int]:
-        """Convierte un fonema ARPABET crudo en un vector de rasgos fonológicos.
-        
-        Args:
-            raw_token (str): Símbolo fonético extraído del TextGrid.
-            
-        Returns:
-            List[int]: Vector binario (14 dimensiones) indicando la presencia 
-                o ausencia de cada rasgo fonológico.
-        """
+        """Convierte un fonema ARPABET crudo en un vector de rasgos fonológicos."""
         clean_token = re.sub(r'[^A-Z]', '', str(raw_token).strip().upper())
         if not clean_token:
             return [0] * len(self.FEATURE_NAMES)
@@ -86,17 +77,7 @@ class PhonologicalExtractor:
         return [0] * len(self.FEATURE_NAMES)
 
     def extract(self, intervals: List, total_duration: float) -> pd.DataFrame:
-        """Proyecta los fonemas en una matriz temporal de alta resolución.
-        
-        Args:
-            intervals (List): Lista de objetos de intervalo del nivel 'phone' 
-                del TextGrid.
-            total_duration (float): Duración total del audio en segundos.
-            
-        Returns:
-            pd.DataFrame: Matriz temporal (muestras x rasgos) a la frecuencia 
-                de muestreo configurada.
-        """
+        """Proyecta los fonemas en una matriz temporal a 100 Hz."""
         total_samples = int(np.ceil(total_duration * HIGH_RES_FS))
         matrix = np.zeros((total_samples, len(self.FEATURE_NAMES)), dtype=np.int8)
         
@@ -114,24 +95,14 @@ class PhonologicalExtractor:
 
 
 class LexicalStatsExtractor:
-    """Extractor del espacio de características léxico-estadísticas."""
+    """Extractor del espacio de características léxico-estadísticas (4 rasgos)."""
     
     FEATURE_NAMES: List[str] = [
         'word_presence', 'lexical_frequency', 'word_length_chars', 'word_duration_secs'
     ]
 
     def extract(self, df_alignment: pd.DataFrame, total_duration: float) -> pd.DataFrame:
-        """Proyecta métricas de uso y forma léxica en una matriz temporal.
-        
-        Args:
-            df_alignment (pd.DataFrame): Tabla con los intervalos temporales de 
-                las palabras validadas.
-            total_duration (float): Duración total del audio en segundos.
-            
-        Returns:
-            pd.DataFrame: Matriz temporal (muestras x métricas) con propiedades 
-                físicas y frecuencias relativas (Zipf) de cada palabra.
-        """
+        """Proyecta métricas de uso y forma léxica en una matriz temporal."""
         total_samples = int(np.ceil(total_duration * HIGH_RES_FS))
         matrix = np.zeros((total_samples, len(self.FEATURE_NAMES)), dtype=np.float32)
         
@@ -153,7 +124,7 @@ class LexicalStatsExtractor:
 
 
 class LexicalCategoricalExtractor:
-    """Extractor del espacio léxico-categorial (Control de finitud verbal)."""
+    """Extractor del espacio léxico-categorial (8 rasgos de control de finitud)."""
     
     FEATURE_NAMES: List[str] = [
         'noun', 'adjective', 'adverb', 'pronoun', 'preposition', 
@@ -161,16 +132,7 @@ class LexicalCategoricalExtractor:
     ]
 
     def _classify(self, token: spacy.tokens.Token) -> List[int]:
-        """Clasifica un token en su categoría gramatical principal.
-        
-        Discrimina verbos no finitos para separarlos del espacio de interés.
-        
-        Args:
-            token (spacy.tokens.Token): Token procesado por el modelo de NLP.
-            
-        Returns:
-            List[int]: Vector binario (8 dimensiones) de categorías sintácticas.
-        """
+        """Clasifica un token separando formas no finitas del espacio de interés."""
         features = [0] * len(self.FEATURE_NAMES)
         pos, tag = token.pos_, token.tag_
         
@@ -187,16 +149,7 @@ class LexicalCategoricalExtractor:
         return features
 
     def extract(self, df_alignment: pd.DataFrame, doc: spacy.tokens.Doc, total_duration: float) -> pd.DataFrame:
-        """Proyecta etiquetas gramaticales en la matriz temporal continua.
-        
-        Args:
-            df_alignment (pd.DataFrame): Mapeo temporal de las palabras.
-            doc (spacy.tokens.Doc): Documento procesado por spaCy.
-            total_duration (float): Duración total en segundos.
-            
-        Returns:
-            pd.DataFrame: Matriz indicadora de categorías gramaticales.
-        """
+        """Proyecta etiquetas gramaticales en la matriz temporal continua."""
         total_samples = int(np.ceil(total_duration * HIGH_RES_FS))
         matrix = np.zeros((total_samples, len(self.FEATURE_NAMES)), dtype=np.int8)
         
@@ -220,35 +173,19 @@ class LexicalCategoricalExtractor:
 
 
 class SyntacticExtractor:
-    """Extractor del espacio sintáctico (Distancia, profundidad y raíz)."""
+    """Extractor del espacio sintáctico (3 rasgos: distancia, profundidad y raíz)."""
     
     FEATURE_NAMES: List[str] = ['dependency_distance', 'syntactic_depth', 'is_root']
 
     def _classify(self, token: spacy.tokens.Token) -> List[int]:
-        """Calcula métricas de complejidad sintáctica para un token.
-        
-        Args:
-            token (spacy.tokens.Token): Token procesado con árbol de dependencias.
-            
-        Returns:
-            List[int]: Valores discretos de distancia, profundidad y jerarquía.
-        """
+        """Calcula métricas de complejidad estructural sintáctica para un token."""
         is_root = 1 if token.dep_ == "ROOT" else 0
         dep_distance = int(abs(token.i - token.head.i))
         depth = int(sum(1 for _ in token.ancestors))
         return [dep_distance, depth, is_root]
 
     def extract(self, df_alignment: pd.DataFrame, doc: spacy.tokens.Doc, total_duration: float) -> pd.DataFrame:
-        """Proyecta la complejidad estructural clausal en el tiempo.
-        
-        Args:
-            df_alignment (pd.DataFrame): Mapeo temporal de las palabras.
-            doc (spacy.tokens.Doc): Documento procesado por spaCy.
-            total_duration (float): Duración total en segundos.
-            
-        Returns:
-            pd.DataFrame: Matriz temporal con la integración sintáctica estimada.
-        """
+        """Proyecta la complejidad clausal estructural en el tiempo."""
         total_samples = int(np.ceil(total_duration * HIGH_RES_FS))
         matrix = np.zeros((total_samples, len(self.FEATURE_NAMES)), dtype=np.int16)
         
@@ -271,7 +208,7 @@ class SyntacticExtractor:
 
 
 class FiniteTenseExtractor:
-    """Extractor del Espacio de Interés: Tiempo Gramatical Finito."""
+    """Extractor del Espacio de Interés: Tiempo Gramatical Finito (4 rasgos exactos)."""
     
     FEATURE_NAMES: List[str] = [
         'past_regular', 'past_irregular', 'non_past_marked_3sg', 'non_past_unmarked'
@@ -279,16 +216,10 @@ class FiniteTenseExtractor:
     AMBIGUOUS_CONTRACTIONS: Set[str] = {"'d"}
 
     def _classify(self, token: spacy.tokens.Token) -> List[int]:
-        """Clasifica formas verbales finitas en sus subtipos morfológicos.
+        """Clasifica formas verbales finitas en sus 4 realizaciones morfológicas.
         
-        Excluye explícitamente modales defectivos y contracciones ambiguas para
-        mantener la pureza conceptual del contraste temporal empírico.
-        
-        Args:
-            token (spacy.tokens.Token): Token procesado por spaCy.
-            
-        Returns:
-            List[int]: Vector indicando el subtipo gramatical de tiempo finito.
+        Excluye explícitamente modales (MD) y la contracción ambigua 'd para
+        preservar la pureza conceptual del contraste temporal finito.
         """
         features = [0, 0, 0, 0]
         pos, tag, text = token.pos_, token.tag_, token.text.lower()
@@ -297,29 +228,23 @@ class FiniteTenseExtractor:
             return features
             
         if tag == 'VBD':
-            if text.endswith('ed'): features[0] = 1
-            else: features[1] = 1
+            if text.endswith('ed'): 
+                features[0] = 1  # past_regular
+            else: 
+                features[1] = 1  # past_irregular
         elif tag == 'VBZ':
-            features[2] = 1
+            features[2] = 1      # non_past_marked_3sg
         elif tag == 'VBP':
-            features[3] = 1
+            features[3] = 1      # non_past_unmarked
             
         return features
 
     def extract(self, df_alignment: pd.DataFrame, doc: spacy.tokens.Doc, total_duration: float) -> pd.DataFrame:
-        """Proyecta el fenómeno lingüístico de interés en la matriz temporal.
+        """Proyecta el espacio de interés en una matriz de exactamente 4 columnas.
         
-        Además de las cuatro realizaciones específicas (trazabilidad), genera 
-        dos macro-características combinadas ('past_total' y 'non_past_total') 
-        que definen el dominio empírico contrastivo del estudio.
-        
-        Args:
-            df_alignment (pd.DataFrame): Mapeo temporal de las palabras.
-            doc (spacy.tokens.Doc): Documento procesado por spaCy.
-            total_duration (float): Duración total en segundos.
-            
-        Returns:
-            pd.DataFrame: Matriz temporal de tiempo gramatical finito (6 dimensiones).
+        Decisión metodológica: La matriz predictora contiene ÚNICAMENTE las 4
+        características elementales. Las categorías agregadas (past_total y 
+        non_past_total) se generan exclusivamente para reportes de auditoría.
         """
         total_samples = int(np.ceil(total_duration * HIGH_RES_FS))
         matrix = np.zeros((total_samples, len(self.FEATURE_NAMES)), dtype=np.int8)
@@ -339,25 +264,15 @@ class FiniteTenseExtractor:
                     
         time_axis = np.arange(total_samples) / HIGH_RES_FS
         df = pd.DataFrame(matrix, columns=self.FEATURE_NAMES, index=time_axis)
-        
-        # Generación de los dos dominios principales según metodología
-        df['past_total'] = df['past_regular'] | df['past_irregular']
-        df['non_past_total'] = df['non_past_marked_3sg'] | df['non_past_unmarked']
         df.index.name = 'time_seconds'
-        
         return df
 
 
 class SemanticLSAExtractor:
-    """Extractor del espacio léxico-semántico latente."""
+    """Extractor del espacio léxico-semántico latente (10 componentes)."""
 
     def __init__(self, semantic_model: Pipeline, nlp_model: spacy.language.Language):
-        """Inicializa el extractor con modelos preentrenados y configuraciones.
-        
-        Args:
-            semantic_model (Pipeline): Pipeline scikit-learn entrenado globalmente (TF-IDF + SVD).
-            nlp_model (spacy.language.Language): Modelo en memoria de procesamiento spaCy.
-        """
+        """Inicializa el extractor con el modelo LSA entrenado en Train."""
         self.semantic_model = semantic_model
         self.nlp_model = nlp_model
         self.feature_names = [f"semantic_dim_{i}" for i in range(LATENT_SEMANTIC_COMPONENTS)]
@@ -365,19 +280,7 @@ class SemanticLSAExtractor:
         self.noise_pattern = LSA_NOISE_PATTERN
 
     def extract(self, intervals: List, total_duration: float) -> pd.DataFrame:
-        """Proyecta las dimensiones semánticas continuas sobre las cláusulas.
-        
-        Segmenta el audio usando el umbral de pausa configurado, agrupa las 
-        palabras, infiere el vector temático y lo aplica a la duración completa 
-        de esa cláusula.
-        
-        Args:
-            intervals (List): Lista de objetos de intervalo (nivel de palabras).
-            total_duration (float): Duración total de la narración en segundos.
-            
-        Returns:
-            pd.DataFrame: Matriz temporal continua de componentes abstractos (LSA).
-        """
+        """Proyecta las dimensiones semánticas continuas sobre las cláusulas."""
         total_samples = int(np.ceil(total_duration * HIGH_RES_FS))
         matrix = np.zeros((total_samples, len(self.feature_names)), dtype=np.float32)
         
@@ -408,7 +311,7 @@ class SemanticLSAExtractor:
                 sentence_end_time = interval.end_time
                 current_sentence_words.append(clean_word)
                 
-        # Procesar el último fragmento restante (si la historia termina de golpe)
+        # Procesar el último fragmento restante
         if current_sentence_words and sentence_start_time is not None:
             self._process_and_project_chunk(
                 current_sentence_words, sentence_start_time, sentence_end_time,
@@ -424,19 +327,7 @@ class SemanticLSAExtractor:
         self, words: List[str], start_time: float, end_time: float, 
         matrix: np.ndarray, total_samples: int
     ) -> None:
-        """Lematiza una cláusula, extrae su vector semántico y la proyecta en la matriz.
-        
-        Aplica los filtros de exclusión (stop-words) definidos globalmente.
-        Modifica la matriz objetivo `in-place` por referencia para evitar copias 
-        en memoria durante la iteración masiva temporal.
-        
-        Args:
-            words (List[str]): Lista de tokens crudos pertenecientes a la cláusula.
-            start_time (float): Momento de inicio de la cláusula en el audio (seg).
-            end_time (float): Momento de fin de la cláusula en el audio (seg).
-            matrix (np.ndarray): Matriz continua destino (modificada por referencia).
-            total_samples (int): Límite de seguridad de muestras temporales.
-        """
+        """Lematiza una cláusula y proyecta su vector LSA en la matriz (in-place)."""
         raw_sentence = " ".join(words)
         doc = self.nlp_model(raw_sentence)
         lemmas = [
@@ -444,7 +335,6 @@ class SemanticLSAExtractor:
             if not t.is_stop and not t.is_punct and not t.like_num and t.lemma_.strip()
         ]
         
-        # Filtro estricto usando las stop words provenientes del archivo de configuración
         final_lemmas = [w for w in lemmas if w not in self.stop_words]
         lemmatized_sentence = " ".join(final_lemmas)
         

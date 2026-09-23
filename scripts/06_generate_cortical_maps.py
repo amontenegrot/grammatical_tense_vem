@@ -1,10 +1,12 @@
 # scripts/06_generate_cortical_maps.py
-"""Orquestador de Visualización Cortical 3D.
+"""Orquestador de Visualización Cortical 3D en PyCortex.
 
-Genera mapas corticales interactivos utilizando PyCortex. Proyecta los 
-resultados del modelo predictivo en la superficie del cerebro, creando 
-dos capas (layers): una para la red global del lenguaje y otra específica 
-para el tiempo gramatical.
+Genera proyecciones corticales individuales en la anatomía del participante,
+organizadas en tres capas complementarias:
+1. Capa 1: Desempeño del Modelo Global (R2 > 0.01) en escala cálida secuencial ('OrRd').
+2. Capa 2a: Aporte del Tiempo Gramatical Umbralizado (FDR < 0.05) en escala secuencial ('OrRd').
+3. Capa 2b: Aporte del Tiempo Gramatical Descriptivo Continuo (sin umbral) en escala divergente ('coolwarm').
+Exporta visores web estáticos desacoplados de la evaluación numérica principal.
 """
 
 import configparser
@@ -18,11 +20,14 @@ import numpy as np
 import pandas as pd
 
 from src.config import (
-    CORTICAL_COLORMAP, 
+    CORTICAL_COLORMAP_DIVERGING,
+    CORTICAL_COLORMAP_GLOBAL,
+    CORTICAL_COLORMAP_TENSE_SIG,
     DATA_DIR,
     DIR_PROCESSED,
     STATISTICAL_ALPHA,
 )
+
 
 RESULTS_IN_DIR = DIR_PROCESSED / "results_voxelwise"
 WEB_EXPORT_DIR = DIR_PROCESSED / "cortical_maps_web"
@@ -30,7 +35,7 @@ PYCORTEX_DB_PATH = DATA_DIR / "derivatives" / "pycortex-db"
 
 
 def configure_pycortex() -> None:
-    """Configura de manera forzada y segura la ruta local de PyCortex."""
+    """Configura de manera forzada y segura el filestore local de PyCortex."""
     cortex_cfg_dir = Path(os.path.expanduser("~/.config/pycortex"))
     cortex_cfg_dir.mkdir(parents=True, exist_ok=True)
     cortex_cfg_file = cortex_cfg_dir / "options.cfg"
@@ -48,12 +53,11 @@ def configure_pycortex() -> None:
 
     cortex.options.config.set("basic", "filestore", str(PYCORTEX_DB_PATH))
     cortex.db.filestore = str(PYCORTEX_DB_PATH)
-    
     print(f"[INFO] PyCortex configurado con Filestore en: {PYCORTEX_DB_PATH}")
 
 
 def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> None:
-    """Proyecta los datos de ML en la corteza y genera el visor web."""
+    """Proyecta los resultados del participante en la superficie cortical."""
     results_path = RESULTS_IN_DIR / f"{subject_id}_voxelwise_results.parquet"
 
     if not results_path.exists():
@@ -63,32 +67,31 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
     print(f"\n--- Modelando Superficie Cortical para {subject_id} ---")
     df_results = pd.read_parquet(results_path)
 
-    # 1. Extracción de Vectores de Varianza
     r2_global = df_results["r2_global"].values.astype(float)
     delta_r2 = df_results["delta_r2_tense"].values.astype(float)
     p_values = df_results["p_value_fdr"].values
 
-    # 2. Enmascarado de Datos (Reemplazando Alpha Mask por NaN)
-    # PyCortex omite (hace transparentes) los valores NaN nativamente.
-    # Esto evita el bug de serialización JSON de arreglos en Python 3.12.
     is_significant = p_values < STATISTICAL_ALPHA
     n_sig_voxels = np.sum(is_significant)
-    print(f"[INFO] Vóxeles significativos (Tense): {n_sig_voxels:,} (FDR < {STATISTICAL_ALPHA})")
+    print(f"[INFO] Vóxeles significativos (FDR < {STATISTICAL_ALPHA}): {n_sig_voxels:,} de {len(df_results):,}")
 
-    # Para el Sanity Check (R2 Global), mostramos solo vóxeles donde el modelo predice algo
-    # de forma decente (> 1% de varianza), sin importar el p-value del Tense.
+    # 1. Enmascarado de Datos (Reemplazando por NaN para transparencia nativa en WebGL)
+    # Capa 1: Sanity Check (Modelo Global R2 > 0.01)
     r2_global_masked = np.where(r2_global > 0.01, r2_global, np.nan)
     
-    # Para la red de Tiempo Gramatical, filtramos ESTRICTAMENTE por significancia estadística
-    delta_r2_masked = np.where(is_significant, delta_r2, np.nan)
+    # Capa 2a: Tiempo Gramatical Umbralizado por FDR
+    delta_r2_sig_masked = np.where(is_significant, delta_r2, np.nan)
+    
+    # Capa 2b: Tiempo Gramatical Continuo Descriptivo (sin filtro estadístico)
+    delta_r2_unthresholded = delta_r2.copy()
 
     try:
-        # 3. Validación Anatómica
+        # 2. Validación Anatómica
         cortex_subject = subject_id
         if cortex_subject not in cortex.db.subjects:
             cortex_subject = cortex_subject.replace("sub-", "")
             if cortex_subject not in cortex.db.subjects:
-                raise ValueError(f"Sujeto '{subject_id}' no hallado en {PYCORTEX_DB_PATH}")
+                raise ValueError(f"Sujeto '{subject_id}' no hallado en el filestore {PYCORTEX_DB_PATH}")
 
         transforms_dir = PYCORTEX_DB_PATH / cortex_subject / "transforms"
         if not transforms_dir.exists():
@@ -105,60 +108,74 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
             
         xfm_name = xfm_names[0]
 
-        # 4. Cálculo de Umbrales Visuales Dinámicos (Forzados a Float puro)
-        # Se extraen los valores que NO son NaN para calcular el percentil 99 real
+        # 3. Límites Dinámicos de Escala
         vmax_global = 0.05
         valid_global = r2_global_masked[~np.isnan(r2_global_masked)]
         if len(valid_global) > 0:
             vmax_global = max(float(np.percentile(valid_global, 99)), 0.05)
 
-        vmax_delta = 0.01
-        valid_delta = delta_r2_masked[~np.isnan(delta_r2_masked)]
-        if len(valid_delta) > 0:
-            vmax_delta = max(float(np.percentile(valid_delta, 99)), 0.01)
+        # Umbral para Capa 2a (Sig)
+        vmax_sig = 0.01
+        valid_sig = delta_r2_sig_masked[~np.isnan(delta_r2_sig_masked)]
+        if len(valid_sig) > 0:
+            vmax_sig = max(float(np.percentile(valid_sig, 99)), 0.01)
 
-        # 5. Construcción de Capas Volumétricas (Layers)
+        # Umbral simétrico para Capa 2b (Divergente centrado en 0)
+        vmax_div = float(max(np.percentile(np.abs(delta_r2_unthresholded), 99), 0.005))
+
+        # 4. Construcción de Capas Volumétricas
+        # Capa 1: Modelo Global (OrRd)
         vol_global = cortex.Volume(
             r2_global_masked,
             subject=cortex_subject,
             xfmname=xfm_name,
-            cmap=CORTICAL_COLORMAP, 
+            cmap=CORTICAL_COLORMAP_GLOBAL, 
             vmin=0.01,
             vmax=vmax_global
         )
 
-        vol_tense = cortex.Volume(
-            delta_r2_masked,
+        # Capa 2a: Tiempo Gramatical Umbralizado FDR (OrRd)
+        vol_tense_sig = cortex.Volume(
+            delta_r2_sig_masked,
             subject=cortex_subject,
             xfmname=xfm_name,
-            cmap=CORTICAL_COLORMAP, 
+            cmap=CORTICAL_COLORMAP_TENSE_SIG, 
             vmin=0.0001,
-            vmax=vmax_delta
+            vmax=vmax_sig
+        )
+
+        # Capa 2b: Tiempo Gramatical Descriptivo Continuo (coolwarm simétrico)
+        vol_tense_div = cortex.Volume(
+            delta_r2_unthresholded,
+            subject=cortex_subject,
+            xfmname=xfm_name,
+            cmap=CORTICAL_COLORMAP_DIVERGING,
+            vmin=-vmax_div,
+            vmax=vmax_div
         )
 
         layer_dict = {
-            "1. Global Language Network (R2)": vol_global,
-            "2. Tense Specific Network (Delta R2)": vol_tense
+            "1. Modelo Global (R2 > 0.01)": vol_global,
+            "2a. Tiempo Gramatical (FDR < 0.05)": vol_tense_sig,
+            "2b. Tiempo Gramatical (Continuo Descriptivo)": vol_tense_div
         }
 
-        # 6. Exportación y Visualización
+        # 5. Exportación a Visor Web Estático
         subject_export_dir = WEB_EXPORT_DIR / subject_id
         subject_export_dir.mkdir(parents=True, exist_ok=True)
 
         cortex.webgl.make_static(
             outpath=str(subject_export_dir),
             data=layer_dict,
-            title=f"VEM Results - {subject_id}"
+            title=f"VEM Resultados Corticales - {subject_id}"
         )
-        print(f"[EXITO] Mapa estático web exportado en: {subject_export_dir}")
+        print(f"[ÉXITO] Visor estático web exportado en: {subject_export_dir}")
 
         if start_server:
             print("\n" + "=" * 70)
-            print("[SISTEMA] INICIANDO SERVIDOR WEB LOCAL")
-            print("Verifique la URL generada debajo (ej. http://localhost:XXXXX).")
+            print(f"[SISTEMA] INICIANDO SERVIDOR WEB LOCAL PARA {subject_id}")
             print("=" * 70)
-            
-            _ = cortex.webshow(layer_dict, title=f"VEM Predictors - {subject_id}")
+            _ = cortex.webshow(layer_dict, title=f"VEM - {subject_id}")
             input("\n[PAUSA] Presione ENTER en esta terminal para detener el servidor...")
 
     except Exception:
@@ -166,44 +183,9 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
         print(traceback.format_exc())
 
 
-def print_methodological_guide() -> None:
-    """Imprime la interpretación metodológica de los mapas en consola."""
-    print("\n" + "=" * 75)
-    print("GUIA DE INTERPRETACION CORTICAL (Para redaccion del manuscrito)")
-    print("=" * 75)
-    print("\nAl abrir el visualizador de PyCortex, utilice el panel 'Data' (derecha)")
-    print("para alternar entre las dos capas generadas:\n")
-    
-    print("Capa 1: Global Language Network (R2 Global)")
-    print("  - Descripcion: Precision total del modelo usando las 45 caracteristicas.")
-    print("  - Implicacion metodologica: Actua como un 'Sanity Check'. Debe revelar")
-    print("    actividad robusta en regiones clasicas del lenguaje (STG, Broca, Wernicke).")
-    print("    Confirma que la senal fMRI y el paradigma naturalista son viables, probando")
-    print("    que la ausencia de efecto en el tiempo gramatical es real (True Null).")
-    
-    print("\nCapa 2: Tense Specific Network (Delta R2)")
-    print("  - Descripcion: Varianza predictiva unica del Tiempo Gramatical Finito.")
-    print("  - Implicacion metodologica: Responde de forma directa a la interrogante:")
-    print("    '¿Que areas del cerebro procesan el tiempo gramatical en general?'")
-    print("    Aisla espacialmente el efecto morfosintactico tras controlar estadisticamente")
-    print("    los dominios semantico, sintactico, lexico y fonologico.")
-    print("=" * 75 + "\n")
-
-
 if __name__ == "__main__":
     configure_pycortex()
-
-    # Configuracion de ejecucion
-    SUBJECT_INPUT: Union[str, List[str]] = "sub-UTS01"
-    # SUBJECT_INPUT: Union[str, List[str]] = [
-    #     "sub-UTS01", "sub-UTS02", "sub-UTS03"
-    # ]
-
-    if isinstance(SUBJECT_INPUT, str):
-        generate_and_export_viewer(SUBJECT_INPUT, start_server=True)
-    elif isinstance(SUBJECT_INPUT, list):
-        print(f"[INFO] Modo Batch. Procesando {len(SUBJECT_INPUT)} sujetos de forma silenciosa...")
-        for subject in SUBJECT_INPUT:
-            generate_and_export_viewer(subject, start_server=False)
-            
-    print_methodological_guide()
+    
+    # Configuración de ejecución (Participante individual o lista)
+    SUBJECT_TO_PLOT: str = "sub-UTS01"
+    generate_and_export_viewer(SUBJECT_TO_PLOT, start_server=False)

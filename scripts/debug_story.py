@@ -5,9 +5,9 @@ from pathlib import Path
 import spacy
 import tgt
 
-from src.config import DIR_TEXTGRIDS, SPACY_MODEL_NAME
-from src.features.text_parser import reconstruct_and_map_text
-from src.features.extractors import (
+from ..src.config import DIR_TEXTGRIDS, SPACY_MODEL_NAME
+from ..src.features.text_parser import reconstruct_and_map_text
+from ..src.features.extractors import (
     PhonologicalExtractor,
     LexicalStatsExtractor,
     LexicalCategoricalExtractor,

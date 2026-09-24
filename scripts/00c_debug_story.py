@@ -1,4 +1,4 @@
-# scripts/00b_debug_story.py
+# scripts/00c_debug_story.py
 """Script de diagnóstico puntual para historias con error."""
 import sys
 from pathlib import Path

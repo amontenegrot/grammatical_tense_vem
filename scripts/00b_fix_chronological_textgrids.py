@@ -1,4 +1,4 @@
-# scripts/00a_fix_chronological_textgrids.py
+# scripts/00b_fix_chronological_textgrids.py
 """Convierte TextGrids cronológicos de Praat a formato estándar ooTextFile en 2 líneas por intervalo."""
 import re
 import sys

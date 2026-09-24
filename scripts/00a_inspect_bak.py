@@ -1,4 +1,4 @@
-# scripts/inspect_bak.py
+# scripts/00a_inspect_bak.py
 import sys
 from pathlib import Path
 

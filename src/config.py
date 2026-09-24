@@ -52,7 +52,8 @@ DIR_AUDIT_REPORTS = DB_DIR / "csv_reports"
 HDF5_DATASET_KEY = "data"
 
 # Historias excluidas del análisis por fallas técnicas o decisiones metodológicas
-EXCLUDED_STORIES = {'legacy', 'exorcism'}
+# EXCLUDED_STORIES = {'legacy', 'exorcism'}
+EXCLUDED_STORIES = set()
 
 # Historia reservada exclusivamente para la evaluación fuera de muestra (Test Set).
 # - "wheretheressmoke": Seleccionada metodológicamente por contar con múltiples 

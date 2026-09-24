@@ -1,13 +1,21 @@
 # scripts/debug_story.py
 """Script de diagnóstico puntual para historias con error."""
-import traceback
+import sys
 from pathlib import Path
+
+# --- GARANTIZAR QUE PYTHON ENCUENTRE EL MÓDULO 'src' ---
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+# -------------------------------------------------------
+
+import traceback
 import spacy
 import tgt
 
-from ..src.config import DIR_TEXTGRIDS, SPACY_MODEL_NAME
-from ..src.features.text_parser import reconstruct_and_map_text
-from ..src.features.extractors import (
+from src.config import DIR_TEXTGRIDS, SPACY_MODEL_NAME
+from src.features.text_parser import reconstruct_and_map_text
+from src.features.extractors import (
     PhonologicalExtractor,
     LexicalStatsExtractor,
     LexicalCategoricalExtractor,
@@ -19,7 +27,13 @@ STORIES_TO_TEST = ['legacy', 'exorcism']
 
 def debug_stories():
     print("Iniciando diagnóstico puntual...\n")
-    nlp = spacy.load(SPACY_MODEL_NAME, disable=["ner"])
+    print(f"Ruta raíz del proyecto: {PROJECT_ROOT}\n")
+    
+    try:
+        nlp = spacy.load(SPACY_MODEL_NAME, disable=["ner"])
+    except Exception as e:
+        print(f"[ERROR] No se pudo cargar el modelo spaCy '{SPACY_MODEL_NAME}': {e}")
+        return
     
     phono_ext = PhonologicalExtractor()
     lex_stats_ext = LexicalStatsExtractor()
@@ -90,7 +104,7 @@ def debug_stories():
             print(traceback.format_exc())
             continue
 
-        print(f"\n>> RESULTADO: {story} se puede procesar sin errores en los primeros 5 módulos.\n")
+        print(f"\n>> RESULTADO: {story} se procesó correctamente en esta prueba.\n")
 
 if __name__ == "__main__":
     debug_stories()

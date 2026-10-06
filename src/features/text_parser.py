@@ -7,16 +7,50 @@ estrictamente la alineación temporal original de cada caracter.
 """
 
 import re
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
 import tgt
 
 from src.config import (
-    LSA_NOISE_PATTERN, 
-    THRESHOLD_COMMA_SEC, 
+    DIR_TEXTGRIDS,
+    DIR_TEXTGRIDS_REPAIRED,
+    LSA_NOISE_PATTERN,
+    THRESHOLD_COMMA_SEC,
     THRESHOLD_PERIOD_SEC,
 )
+
+
+def discover_available_stories() -> List[str]:
+    """Enumera las historias con TextGrid disponible (fuente cruda o reparada).
+
+    Decisión técnica: Escanea ambos directorios sin aplicar EXCLUDED_STORIES,
+    ya que esta función responde una pregunta puramente técnica (¿existe un
+    TextGrid para esta historia?), no la decisión metodológica de si la
+    historia debe entrar al modelado (eso lo resuelve cada script consumidor).
+    """
+    stems = set()
+    if DIR_TEXTGRIDS.exists():
+        stems.update(p.stem for p in DIR_TEXTGRIDS.glob("*.TextGrid"))
+    if DIR_TEXTGRIDS_REPAIRED.exists():
+        stems.update(p.stem for p in DIR_TEXTGRIDS_REPAIRED.glob("*.TextGrid"))
+    return sorted(stems)
+
+
+def resolve_textgrid_path(story: str) -> Path:
+    """Localiza el TextGrid de una historia priorizando la versión reparada.
+
+    Si `scripts/00b_fix_chronological_textgrids.py` generó una versión
+    reparada en DIR_TEXTGRIDS_REPAIRED (porque el original en DIR_TEXTGRIDS
+    no era parseable en formato estándar), se usa esa; en caso contrario se
+    recurre al TextGrid original crudo. El original en DIR_TEXTGRIDS nunca
+    se modifica, por lo que ambas fuentes coexisten permanentemente.
+    """
+    repaired_path = DIR_TEXTGRIDS_REPAIRED / f"{story}.TextGrid"
+    if repaired_path.exists():
+        return repaired_path
+    return DIR_TEXTGRIDS / f"{story}.TextGrid"
 
 
 def reconstruct_and_map_text(textgrid_path: str) -> Tuple[str, pd.DataFrame]:

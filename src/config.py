@@ -34,6 +34,11 @@ DIR_ARTIFACTS = PROJECT_ROOT / "artifacts"
 DIR_FEATURES_HIGH_RESOLUTION = DIR_PROCESSED / "features_high_resolution"
 DIR_FEATURES_FMRI_TR = DIR_PROCESSED / "features_fmri_tr"
 
+# TextGrids reparados (ej. formato cronológico de Praat reconstruido a estándar).
+# Decisión técnica: Nunca se escribe sobre DIR_TEXTGRIDS (dato original/crudo).
+# Las historias reparadas se depositan aquí y se consultan como fuente adicional.
+DIR_TEXTGRIDS_REPAIRED = DIR_PROCESSED / "textgrids_repaired"
+
 # --- Bases de Datos y Reportes ---
 DB_DIR = PROJECT_ROOT / "db"
 # Base de datos principal para metadatos y auditorías (Prefijo 'audit_')

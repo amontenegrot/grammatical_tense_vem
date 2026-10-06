@@ -23,7 +23,6 @@ import tgt
 
 from src.config import (
     DIR_ARTIFACTS,
-    DIR_TEXTGRIDS,
     EXCLUDED_STORIES,
     LATENT_SEMANTIC_COMPONENTS,
     LSA_CUSTOM_STOP_WORDS,
@@ -37,6 +36,7 @@ from src.config import (
     THRESHOLD_PERIOD_SEC,
 )
 from src.db_manager import load_table_to_dataframe, log_execution_time, save_dataframe_to_table
+from src.features.text_parser import resolve_textgrid_path
 
 
 MODEL_OUT_PATH = DIR_ARTIFACTS / "semantic_lsa_model.joblib"
@@ -48,7 +48,7 @@ def extract_sentences_from_corpus(stories: List[str]) -> List[str]:
     all_sentences = []
     
     for story in stories:
-        tg_path = DIR_TEXTGRIDS / f"{story}.TextGrid"
+        tg_path = resolve_textgrid_path(story)
         if not tg_path.exists():
             continue
             

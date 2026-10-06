@@ -18,7 +18,6 @@ import tgt
 from src.config import (
     DIR_ARTIFACTS,
     DIR_FEATURES_HIGH_RESOLUTION,
-    DIR_TEXTGRIDS,
     FEATURE_COLUMNS_ORDER,
     PRESENTATION_DB_PATH,
     PRESENTATION_STORY,
@@ -34,7 +33,7 @@ from src.features.extractors import (
     SemanticLSAExtractor,
     SyntacticExtractor,
 )
-from src.features.text_parser import reconstruct_and_map_text
+from src.features.text_parser import reconstruct_and_map_text, resolve_textgrid_path
 
 
 FEATURES_OUT_DIR = DIR_FEATURES_HIGH_RESOLUTION
@@ -85,7 +84,7 @@ def run_extraction_pipeline() -> None:
                 print(f"[{i}/{total}] Omitido: {story} ya fue procesada previamente.")
                 continue
 
-            tg_path = DIR_TEXTGRIDS / f"{story}.TextGrid"
+            tg_path = resolve_textgrid_path(story)
             if not tg_path.exists():
                 print(f"[{i}/{total}] Advertencia: TextGrid no encontrado para {story}.")
                 continue

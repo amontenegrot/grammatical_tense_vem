@@ -31,6 +31,60 @@ El pipeline ha sido refactorizado para garantizar un rendimiento óptimo bajo es
    python -m spacy download en_core_web_trf
    ```
 
+## Actualización del Dataset (OpenNeuro ds003020: v3.1.1 → v4.0.0)
+
+El pipeline fue validado originalmente sobre el snapshot **3.1.1** (9 participantes). El snapshot **4.0.0** incorpora al participante **UTS10** (10 participantes en total; confirmado contra el changelog oficial del espejo `OpenNeuroDatasets/ds003020` en GitHub). El dataset se distribuye como un repositorio `git-annex`, lo que permite actualizar trayendo únicamente el contenido nuevo o faltante, sin re-descargar lo que ya está presente localmente.
+
+**Requisito previo:** tener instalado el binario `git-annex` (no basta con `git`):
+```bash
+sudo apt install git-annex   # Debian/Ubuntu/WSL2
+```
+
+**1. Verifique si `data/ds003020` ya es un clon de git-annex:**
+```bash
+ls -la data/ds003020/.git
+```
+*   Si **existe** → continúe con el **Caso A**.
+*   Si **no existe** (ej. se descargó como ZIP desde el navegador) → use el **Caso B**. Es la ruta recomendada si no está seguro del origen de los datos actuales, ya que no modifica en absoluto la carpeta `data/ds003020` existente.
+
+**Caso A — Ya tiene un clon git-annex de la v3.1.1:**
+```bash
+cd data/ds003020
+git fetch --tags
+git checkout 4.0.0
+```
+
+**Caso B — Clonar en una carpeta nueva (no toca `data/ds003020`):**
+```bash
+git clone https://github.com/OpenNeuroDatasets/ds003020.git data/ds003020_v4
+cd data/ds003020_v4
+git annex init "clon-v4.0.0"
+git checkout 4.0.0
+```
+Tras validar que todo quedó correcto, actualice `DATA_DIR` en `src/config.py` para apuntar a `data/ds003020_v4` (o reemplace físicamente la carpeta antigua).
+
+**2. Descargue el contenido, excluyendo los NIfTI crudos (`.nii.gz`) de `sub-UTS*/`:**
+Todo el pipeline consume exclusivamente `derivatives/preprocessed_data/*.hf5`, `derivatives/TextGrids/*.TextGrid` y `stimuli/*.wav` — nunca los volúmenes NIfTI crudos dentro de `sub-UTS01/`, `sub-UTS02/`, etc. Son, por lejos, los archivos más pesados del dataset.
+
+Vista previa (solo lista lo que falta, no descarga nada):
+```bash
+git annex find --not --in here \
+  --exclude='sub-*/*.nii.gz' \
+  --exclude='sub-*/*/*.nii.gz' \
+  --exclude='sub-*/*/*/*.nii.gz'
+```
+Revise el resultado: debe listar archivos nuevos de `sub-UTS10`, `derivatives/` y `stimuli/`, pero ningún `.nii.gz`. Si algún `.nii.gz` aparece en la lista, agregue un patrón `--exclude` adicional con un nivel más de profundidad.
+
+Descarga real (misma lógica de exclusión; lo ya presente localmente se omite automáticamente):
+```bash
+git annex get . \
+  --exclude='sub-*/*.nii.gz' \
+  --exclude='sub-*/*/*.nii.gz' \
+  --exclude='sub-*/*/*/*.nii.gz'
+```
+
+**3. Reanude el pipeline:** repita la Fase 1 en adelante (ver "Guía de Ejecución del Pipeline"). El checkpointing existente omitirá lo ya procesado para los 9 participantes previos y solo generará artefactos nuevos para UTS10.
+
 ## Estructura de Directorios (Orientada a BIDS y Open Science)
 
 ```text

@@ -16,7 +16,7 @@ from pathlib import Path
 # Se asume una estructura donde los datos crudos/BIDS están separados
 # de los datos procesados del proyecto para evitar confusión de carpetas
 PROJECT_ROOT = Path("/home/almontao/proyectos/grammatical_tense_vem")
-DATA_DIR = PROJECT_ROOT / "data" / "ds003020"
+DATA_DIR = Path("/home/almontao/proyectos/ds003020")
 
 # --- Datos Crudos y Derivados BIDS ---
 DIR_TEXTGRIDS = DATA_DIR / "derivatives" / "TextGrids"
@@ -184,6 +184,12 @@ RIDGE_ALPHAS = np.logspace(-2, 4, 20)
 # Número de particiones para la validación cruzada interna (Story-Blocked CV)
 RIDGE_CV_FOLDS = 3
 
+# Presupuesto de memoria (bytes) para materializar predicciones desplazadas circularmente
+# como arreglo 3D (desplazamientos x tiempo x vóxeles) durante la distribución nula.
+# Decisión técnica: 512 MB acota la memoria pico de los dos arreglos (global y restringido)
+# sin perder la ventaja de vectorizar el cálculo de R2 en bloque en vez de iterar en Python.
+NULL_DISTRIBUTION_CHUNK_BYTES = 512 * 1024 * 1024
+
 
 # ==============================================================================
 # 7. VALIDACIÓN ESTADÍSTICA (DESPLAZAMIENTOS CIRCULARES Y FDR)
@@ -195,6 +201,14 @@ CIRCULAR_SHIFT_MARGIN_SENSITIVITY = 16  # Margen ampliado: 16 TRs (32 segundos, 
 
 # Umbral de significancia estadística (Alpha) para control de falsos descubrimientos (FDR Benjamini-Hochberg)
 STATISTICAL_ALPHA = 0.05
+
+# Techo de ruido mínimo (R2) para normalizar el desempeño del modelo por vóxel.
+# Decisión técnica: por debajo de este piso, dividir por el techo de ruido estimado
+# produce cocientes numéricamente inestables (ruido de estimación dominante sobre
+# señal reproducible real); se reporta 'N/A' (NaN) en vez de un número engañoso.
+# Mismo orden de magnitud que el umbral de sanity-check (R2 > 0.01) usado en
+# scripts/06_generate_cortical_maps.py para la Capa 1.
+NOISE_CEILING_MIN_THRESHOLD = 0.01
 
 
 # ==============================================================================

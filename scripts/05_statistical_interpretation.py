@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import (
+    CIRCULAR_SHIFT_MARGIN_SENSITIVITY,
     DIR_PROCESSED,
     PROJECT_ROOT,
     STATISTICAL_ALPHA,
@@ -38,6 +39,17 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
     r2_global = df['r2_global'].values
     delta_r2 = df['delta_r2_tense'].values
     p_fdr = df['p_value_fdr'].values
+
+    # Decisión técnica: parquets generados antes de incorporar la normalización por
+    # techo de ruido carecen de estas columnas (el checkpointing de 04 es por sujeto,
+    # así que pueden coexistir resultados antiguos y nuevos en el mismo directorio).
+    # Se tratan como "sin techo estimable" en vez de fallar.
+    if 'delta_r2_tense_normalized' in df.columns:
+        delta_r2_norm = df['delta_r2_tense_normalized'].values
+        r2_global_norm = df['r2_global_normalized'].values
+    else:
+        delta_r2_norm = np.full(total_voxels, np.nan)
+        r2_global_norm = np.full(total_voxels, np.nan)
     
     # 1. Nivel Global (R2)
     r2_global_positive_pct = float(np.mean(r2_global > 0) * 100)
@@ -69,7 +81,55 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
         sig_delta_mean = "N/A"
         sig_delta_median = "N/A"
         sig_delta_max = "N/A"
-        
+
+    # 4. Nivel Normalizado por Techo de Ruido (solo vóxeles con reproducibilidad estimable)
+    ceiling_mask = ~np.isnan(delta_r2_norm)
+    n_ceiling_estimable = int(np.sum(ceiling_mask))
+    ceiling_voxels_pct = float((n_ceiling_estimable / total_voxels) * 100)
+
+    if n_ceiling_estimable > 0:
+        r2_global_normalized_median = f"{float(np.median(r2_global_norm[ceiling_mask])):.5f}"
+        delta_normalized_median = f"{float(np.median(delta_r2_norm[ceiling_mask])):.5f}"
+        delta_normalized_p95 = f"{float(np.percentile(delta_r2_norm[ceiling_mask], 95)):.5f}"
+
+        sig_ceiling_mask = sig_mask & ceiling_mask
+        if np.sum(sig_ceiling_mask) > 0:
+            sig_delta_normalized_mean = f"{float(np.mean(delta_r2_norm[sig_ceiling_mask])):.5f}"
+        else:
+            sig_delta_normalized_mean = "N/A"
+    else:
+        r2_global_normalized_median = "N/A"
+        delta_normalized_median = "N/A"
+        delta_normalized_p95 = "N/A"
+        sig_delta_normalized_mean = "N/A"
+
+    # 5. Nivel de Robustez: Análisis de Sensibilidad del Margen de Exclusión.
+    # Recalcula la significancia FDR usando únicamente desplazamientos a >= 1 HRF completa
+    # de distancia (CIRCULAR_SHIFT_MARGIN_SENSITIVITY) en vez del margen base, para verificar
+    # que la conclusión no dependa de un margen de exclusión arbitrario. Mismo criterio de
+    # compatibilidad retroactiva que las columnas normalizadas por techo de ruido.
+    if 'p_value_fdr_sensitivity' in df.columns:
+        p_fdr_sensitivity = df['p_value_fdr_sensitivity'].values
+    else:
+        p_fdr_sensitivity = np.full(total_voxels, np.nan)
+
+    sensitivity_computable = not np.all(np.isnan(p_fdr_sensitivity))
+
+    if sensitivity_computable:
+        sig_mask_sensitivity = p_fdr_sensitivity < STATISTICAL_ALPHA
+        sig_voxels_sensitivity = int(np.sum(sig_mask_sensitivity))
+        sig_pct_sensitivity = float((sig_voxels_sensitivity / total_voxels) * 100)
+
+        if sig_voxels > 0:
+            n_stable = int(np.sum(sig_mask & sig_mask_sensitivity))
+            sensitivity_stability_pct = f"{float((n_stable / sig_voxels) * 100):.2f}"
+        else:
+            sensitivity_stability_pct = "N/A"
+    else:
+        sig_voxels_sensitivity = 0
+        sig_pct_sensitivity = 0.0
+        sensitivity_stability_pct = "N/A"
+
     return {
         'total_voxels': total_voxels,
         'r2_global_median': r2_global_median,
@@ -86,7 +146,16 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
         'sig_voxels_pct': sig_pct,
         'sig_delta_mean': sig_delta_mean,
         'sig_delta_median': sig_delta_median,
-        'sig_delta_max': sig_delta_max
+        'sig_delta_max': sig_delta_max,
+        'ceiling_voxels_pct': ceiling_voxels_pct,
+        'r2_global_normalized_median': r2_global_normalized_median,
+        'delta_normalized_median': delta_normalized_median,
+        'delta_normalized_p95': delta_normalized_p95,
+        'sig_delta_normalized_mean': sig_delta_normalized_mean,
+        'sensitivity_computable': sensitivity_computable,
+        'sig_voxels_sensitivity_count': sig_voxels_sensitivity,
+        'sig_voxels_sensitivity_pct': sig_pct_sensitivity,
+        'sensitivity_stability_pct': sensitivity_stability_pct
     }
 
 
@@ -129,7 +198,44 @@ def generate_subject_markdown(metrics: Dict, subject_id: str) -> str:
             f"Bajo la configuración implementada, no se identificó un aporte predictivo separable "
             f"de los 5 espacios de control para la historia '{TEST_STORY}'.\n"
         )
-        
+
+    if metrics['ceiling_voxels_pct'] > 0:
+        md += (
+            f"- **Desempeño Normalizado por Techo de Ruido** "
+            f"({metrics['ceiling_voxels_pct']:.2f}% de vóxeles con techo de ruido estimable, "
+            f"a partir de las repeticiones BOLD de '{TEST_STORY}'): "
+            f"Mediana $R^2_{{global}}/R^2_{{techo}}$ = {metrics['r2_global_normalized_median']}, "
+            f"Mediana $\\Delta R^2/R^2_{{techo}}$ = {metrics['delta_normalized_median']}, "
+            f"Percentil 95 $\\Delta R^2/R^2_{{techo}}$ = {metrics['delta_normalized_p95']}, "
+            f"Media en vóxeles significativos = {metrics['sig_delta_normalized_mean']}.\n"
+        )
+    else:
+        md += (
+            "- **Desempeño Normalizado por Techo de Ruido:** **N/A** (el participante no cuenta con "
+            "repeticiones BOLD de la historia de prueba, o el techo estimado no superó el umbral mínimo "
+            "de confiabilidad en ningún vóxel).\n"
+        )
+
+    if metrics['sensitivity_computable']:
+        md += (
+            f"- **Análisis de Sensibilidad del Margen de Exclusión** (desplazamientos restringidos a "
+            f"$\\geq$ {CIRCULAR_SHIFT_MARGIN_SENSITIVITY} TRs, 1 HRF completa, en vez del margen base): "
+            f"{metrics['sig_voxels_sensitivity_count']:,} vóxeles significativos "
+            f"({metrics['sig_voxels_sensitivity_pct']:.2f}% de la corteza)"
+        )
+        if sig_count > 0:
+            md += (
+                f", de los cuales {metrics['sensitivity_stability_pct']}% se mantienen significativos "
+                f"respecto al margen base.\n"
+            )
+        else:
+            md += ".\n"
+    else:
+        md += (
+            "- **Análisis de Sensibilidad del Margen de Exclusión:** **N/A** (la longitud de la historia "
+            "de prueba no deja desplazamientos válidos bajo el margen ampliado).\n"
+        )
+
     md += "\n"
     return md
 
@@ -194,7 +300,17 @@ def run_statistical_interpretation() -> None:
         f"- **Distribución de $\\Delta R^2$ Muestral:** Mediana transversal = {df_summary['delta_median'].mean():.5f}, "
         f"Proporción de vóxeles con $\\Delta R^2 > 0$ = {df_summary['delta_positive_pct'].mean():.2f}%.\n"
     )
-    
+    markdown_content += (
+        f"- **Cobertura del Techo de Ruido:** En promedio, {df_summary['ceiling_voxels_pct'].mean():.2f}% "
+        f"de los vóxeles por participante contaron con un techo de ruido estimable (repeticiones BOLD "
+        f"disponibles y reproducibilidad por encima del umbral mínimo de confiabilidad).\n"
+    )
+    markdown_content += (
+        f"- **Robustez al Margen de Exclusión:** En promedio, {df_summary['sig_voxels_sensitivity_pct'].mean():.2f}% "
+        f"de los vóxeles por participante se mantuvieron significativos (FDR) bajo el margen ampliado "
+        f"de {CIRCULAR_SHIFT_MARGIN_SENSITIVITY} TRs (1 HRF completa), en vez del margen base.\n"
+    )
+
     # 3. Exportación de artefactos
     report_md_file = REPORTS_OUT_DIR / "statistical_interpretation_report.md"
     report_csv_file = REPORTS_OUT_DIR / "statistical_summary_table.csv"

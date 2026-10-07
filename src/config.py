@@ -16,7 +16,7 @@ from pathlib import Path
 # Se asume una estructura donde los datos crudos/BIDS están separados
 # de los datos procesados del proyecto para evitar confusión de carpetas
 PROJECT_ROOT = Path("/home/almontao/proyectos/grammatical_tense_vem")
-DATA_DIR = PROJECT_ROOT / "data" / "ds003020"
+DATA_DIR = Path("/home/almontao/proyectos/ds003020")
 
 # --- Datos Crudos y Derivados BIDS ---
 DIR_TEXTGRIDS = DATA_DIR / "derivatives" / "TextGrids"

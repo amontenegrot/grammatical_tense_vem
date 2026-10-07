@@ -91,7 +91,7 @@ def validate_textgrid_content(story: str) -> bool:
 
 def audit_experimental_corpus() -> None:
     """Ejecuta la auditoría cruzada entre estímulos, transcripciones y fMRI."""
-    print("Iniciando auditoría del corpus empírico (ds003020 v3.1.1)...")
+    print("Iniciando auditoría del corpus empírico (ds003020 v4.0.0)...")
 
     # 1. Auditoría de TextGrids (Inventario lingüístico disponible)
     # Decisión técnica: se usa discover_available_stories (fuente cruda o reparada)

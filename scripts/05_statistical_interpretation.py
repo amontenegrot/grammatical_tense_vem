@@ -82,6 +82,13 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
         sig_delta_median = "N/A"
         sig_delta_max = "N/A"
 
+    # Resolución estadística empírica bajo el margen base: cuántos desplazamientos
+    # circulares fueron posibles y el p-valor mínimo detectable con ese conteo (ver
+    # src/models/standard_ridge.py). Es constante por sujeto (depende solo de la
+    # duración de la historia de prueba), nunca ausente en ningún formato de parquet.
+    n_exhaustive_shifts = int(df['n_exhaustive_shifts'].iloc[0])
+    p_resolution_min = float(df['p_resolution_min'].iloc[0])
+
     # 4. Nivel Normalizado por Techo de Ruido (solo vóxeles con reproducibilidad estimable)
     ceiling_mask = ~np.isnan(delta_r2_norm)
     n_ceiling_estimable = int(np.sum(ceiling_mask))
@@ -110,10 +117,17 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
     # compatibilidad retroactiva que las columnas normalizadas por techo de ruido.
     if 'p_value_fdr_sensitivity' in df.columns:
         p_fdr_sensitivity = df['p_value_fdr_sensitivity'].values
+        n_exhaustive_shifts_sensitivity = int(df['n_exhaustive_shifts_sensitivity'].iloc[0])
+        p_resolution_min_sensitivity_raw = df['p_resolution_min_sensitivity'].iloc[0]
     else:
         p_fdr_sensitivity = np.full(total_voxels, np.nan)
+        n_exhaustive_shifts_sensitivity = 0
+        p_resolution_min_sensitivity_raw = np.nan
 
     sensitivity_computable = not np.all(np.isnan(p_fdr_sensitivity))
+    p_resolution_min_sensitivity = (
+        f"{float(p_resolution_min_sensitivity_raw):.5f}" if sensitivity_computable else "N/A"
+    )
 
     if sensitivity_computable:
         sig_mask_sensitivity = p_fdr_sensitivity < STATISTICAL_ALPHA
@@ -147,6 +161,8 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
         'sig_delta_mean': sig_delta_mean,
         'sig_delta_median': sig_delta_median,
         'sig_delta_max': sig_delta_max,
+        'n_exhaustive_shifts': n_exhaustive_shifts,
+        'p_resolution_min': p_resolution_min,
         'ceiling_voxels_pct': ceiling_voxels_pct,
         'r2_global_normalized_median': r2_global_normalized_median,
         'delta_normalized_median': delta_normalized_median,
@@ -155,7 +171,9 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
         'sensitivity_computable': sensitivity_computable,
         'sig_voxels_sensitivity_count': sig_voxels_sensitivity,
         'sig_voxels_sensitivity_pct': sig_pct_sensitivity,
-        'sensitivity_stability_pct': sensitivity_stability_pct
+        'sensitivity_stability_pct': sensitivity_stability_pct,
+        'n_exhaustive_shifts_sensitivity': n_exhaustive_shifts_sensitivity,
+        'p_resolution_min_sensitivity': p_resolution_min_sensitivity
     }
 
 
@@ -199,6 +217,12 @@ def generate_subject_markdown(metrics: Dict, subject_id: str) -> str:
             f"de los 5 espacios de control para la historia '{TEST_STORY}'.\n"
         )
 
+    md += (
+        f"  - *Resolución estadística empírica:* {metrics['n_exhaustive_shifts']:,} desplazamientos "
+        f"circulares exhaustivos evaluados bajo el margen base; valor p mínimo detectable = "
+        f"{metrics['p_resolution_min']:.5f}.\n"
+    )
+
     if metrics['ceiling_voxels_pct'] > 0:
         md += (
             f"- **Desempeño Normalizado por Techo de Ruido** "
@@ -219,7 +243,9 @@ def generate_subject_markdown(metrics: Dict, subject_id: str) -> str:
     if metrics['sensitivity_computable']:
         md += (
             f"- **Análisis de Sensibilidad del Margen de Exclusión** (desplazamientos restringidos a "
-            f"$\\geq$ {CIRCULAR_SHIFT_MARGIN_SENSITIVITY} TRs, 1 HRF completa, en vez del margen base): "
+            f"$\\geq$ {CIRCULAR_SHIFT_MARGIN_SENSITIVITY} TRs, 1 HRF completa, en vez del margen base; "
+            f"{metrics['n_exhaustive_shifts_sensitivity']:,} desplazamientos válidos, valor p mínimo "
+            f"detectable = {metrics['p_resolution_min_sensitivity']}): "
             f"{metrics['sig_voxels_sensitivity_count']:,} vóxeles significativos "
             f"({metrics['sig_voxels_sensitivity_pct']:.2f}% de la corteza)"
         )
@@ -329,3 +355,4 @@ if __name__ == "__main__":
     start_time = time.time()
     run_statistical_interpretation()
     log_execution_time("05_statistical_interpretation", time.time() - start_time)
+ 

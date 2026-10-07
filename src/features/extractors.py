@@ -269,75 +269,87 @@ class FiniteTenseExtractor:
 
 
 class SemanticLSAExtractor:
-    """Extractor del espacio léxico-semántico latente (10 componentes)."""
+    """Extractor del espacio léxico-semántico latente (10 componentes).
 
-    def __init__(self, semantic_model: Pipeline, nlp_model: spacy.language.Language):
+    Decisión técnica: reutiliza el Doc de spaCy ya calculado una única vez por
+    historia (full_text, en scripts/02_extract_features.py) en vez de volver a
+    invocar el modelo de lenguaje por cada cláusula. Esto preserva la arquitectura
+    de "Single-Pass Inference" (un solo paso de inferencia transformer por
+    historia) y evita casi duplicar el costo de NLP, que es la etapa más cara
+    del pipeline de extracción.
+    """
+
+    def __init__(self, semantic_model: Pipeline):
         """Inicializa el extractor con el modelo LSA entrenado en Train."""
         self.semantic_model = semantic_model
-        self.nlp_model = nlp_model
         self.feature_names = [f"semantic_dim_{i}" for i in range(LATENT_SEMANTIC_COMPONENTS)]
         self.stop_words = LSA_CUSTOM_STOP_WORDS
         self.noise_pattern = LSA_NOISE_PATTERN
 
-    def extract(self, intervals: List, total_duration: float) -> pd.DataFrame:
-        """Proyecta las dimensiones semánticas continuas sobre las cláusulas."""
+    def extract(self, df_alignment: pd.DataFrame, doc: spacy.tokens.Doc, total_duration: float) -> pd.DataFrame:
+        """Proyecta las dimensiones semánticas continuas sobre las cláusulas.
+
+        Agrupa las palabras alineadas en cláusulas delimitadas por pausas
+        acústicas >= THRESHOLD_PERIOD_SEC (mismo criterio que
+        reconstruct_and_map_text usa para insertar puntos), y resuelve cada
+        palabra a su token ya inferido en `doc` mediante el índice de caracter.
+        """
         total_samples = int(np.ceil(total_duration * HIGH_RES_FS))
         matrix = np.zeros((total_samples, len(self.feature_names)), dtype=np.float32)
-        
-        current_sentence_words = []
+
+        char_to_token = {i: token for token in doc for i in range(token.idx, token.idx + len(token.text))}
+
+        current_sentence_tokens: List[spacy.tokens.Token] = []
         sentence_start_time = None
         sentence_end_time = None
-        
-        for interval in intervals:
-            token = interval.text.strip()
-            is_empty = (token == "")
-            is_noise = bool(self.noise_pattern.search(token))
-            
-            if is_empty or is_noise:
-                duration = interval.end_time - interval.start_time
-                if duration >= THRESHOLD_PERIOD_SEC and current_sentence_words:
+        prev_end_time = None
+
+        for _, row in df_alignment.iterrows():
+            if prev_end_time is not None:
+                gap = row['start_time'] - prev_end_time
+                if gap >= THRESHOLD_PERIOD_SEC and current_sentence_tokens:
                     self._process_and_project_chunk(
-                        current_sentence_words, sentence_start_time, sentence_end_time,
+                        current_sentence_tokens, sentence_start_time, sentence_end_time,
                         matrix, total_samples
                     )
-                    current_sentence_words = []
+                    current_sentence_tokens = []
                     sentence_start_time = None
-                continue
-                
-            clean_word = re.sub(r'[^a-zA-Z\']', '', token).lower()
-            if clean_word:
-                if not current_sentence_words:
-                    sentence_start_time = interval.start_time
-                sentence_end_time = interval.end_time
-                current_sentence_words.append(clean_word)
-                
+
+            prev_end_time = row['end_time']
+            mid_char = (row['char_start'] + row['char_end']) // 2
+            token = char_to_token.get(mid_char)
+
+            if token is not None:
+                if not current_sentence_tokens:
+                    sentence_start_time = row['start_time']
+                sentence_end_time = row['end_time']
+                current_sentence_tokens.append(token)
+
         # Procesar el último fragmento restante
-        if current_sentence_words and sentence_start_time is not None:
+        if current_sentence_tokens and sentence_start_time is not None:
             self._process_and_project_chunk(
-                current_sentence_words, sentence_start_time, sentence_end_time,
+                current_sentence_tokens, sentence_start_time, sentence_end_time,
                 matrix, total_samples
             )
-            
+
         time_axis = np.arange(total_samples) / HIGH_RES_FS
         df = pd.DataFrame(matrix, columns=self.feature_names, index=time_axis)
         df.index.name = 'time_seconds'
         return df
 
     def _process_and_project_chunk(
-        self, words: List[str], start_time: float, end_time: float, 
+        self, tokens: List[spacy.tokens.Token], start_time: float, end_time: float,
         matrix: np.ndarray, total_samples: int
     ) -> None:
-        """Lematiza una cláusula y proyecta su vector LSA en la matriz (in-place)."""
-        raw_sentence = " ".join(words)
-        doc = self.nlp_model(raw_sentence)
+        """Lematiza una cláusula (a partir de tokens ya inferidos) y proyecta su vector LSA."""
         lemmas = [
-            t.lemma_.lower() for t in doc 
+            t.lemma_.lower() for t in tokens
             if not t.is_stop and not t.is_punct and not t.like_num and t.lemma_.strip()
         ]
-        
+
         final_lemmas = [w for w in lemmas if w not in self.stop_words]
         lemmatized_sentence = " ".join(final_lemmas)
-        
+
         if lemmatized_sentence.strip():
             vector_nd = self.semantic_model.transform([lemmatized_sentence])[0]
             start_idx = int(np.floor(start_time * HIGH_RES_FS))

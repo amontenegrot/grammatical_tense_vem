@@ -39,6 +39,22 @@ from src.features.text_parser import reconstruct_and_map_text, resolve_textgrid_
 FEATURES_OUT_DIR = DIR_FEATURES_HIGH_RESOLUTION
 MODEL_OUT_PATH = DIR_ARTIFACTS / "semantic_lsa_model.joblib"
 
+# Sufijos de los 6 parquets independientes que genera cada historia procesada.
+# Decisión técnica: el checkpointing debe verificar los 6, no solo uno, para
+# evitar que una interrupción a mitad de la escritura deje archivos faltantes
+# sin que una re-ejecución lo detecte (la historia se vería como "ya procesada").
+SPACE_FILE_SUFFIXES = [
+    "phonological", "lexical_stats", "categorical", "syntactic", "semantic", "tense"
+]
+
+
+def _is_story_fully_processed(story: str) -> bool:
+    """Verifica que los 6 parquets de espacios existan para una historia."""
+    return all(
+        (FEATURES_OUT_DIR / f"{story}_{suffix}.parquet").exists()
+        for suffix in SPACE_FILE_SUFFIXES
+    )
+
 
 def run_extraction_pipeline() -> None:
     """Ejecuta el flujo secuencial de extracción global de características a 100 Hz.
@@ -73,14 +89,13 @@ def run_extraction_pipeline() -> None:
     lex_cat_ext = LexicalCategoricalExtractor()
     syntactic_ext = SyntacticExtractor()
     tense_ext = FiniteTenseExtractor()
-    sem_lsa_ext = SemanticLSAExtractor(semantic_pipeline, nlp)
+    sem_lsa_ext = SemanticLSAExtractor(semantic_pipeline)
     
     print(f"\nIniciando extracción secuencial para {total} historias (Arquitectura: 43 predictores)...")
 
     for i, story in enumerate(stories, 1):
         try:
-            check_file = FEATURES_OUT_DIR / f"{story}_semantic.parquet"
-            if check_file.exists():
+            if _is_story_fully_processed(story):
                 print(f"[{i}/{total}] Omitido: {story} ya fue procesada previamente.")
                 continue
 
@@ -106,7 +121,7 @@ def run_extraction_pipeline() -> None:
             df_lex_cat = lex_cat_ext.extract(df_align, doc, total_duration)
             df_syn = syntactic_ext.extract(df_align, doc, total_duration)
             df_tense = tense_ext.extract(df_align, doc, total_duration)
-            df_sem = sem_lsa_ext.extract(tg.get_tier_by_name(word_tier).intervals, total_duration)
+            df_sem = sem_lsa_ext.extract(df_align, doc, total_duration)
             
             # Verificación programática de dimensiones exactas
             combined_high_res = pd.concat(
@@ -115,12 +130,17 @@ def run_extraction_pipeline() -> None:
             )
             
             # Validación estricta según el anteproyecto (Exactamente 43 columnas ordenadas)
-            assert combined_high_res.shape[1] == TOTAL_FEATURES_COUNT, (
-                f"Error en {story}: Se esperaban {TOTAL_FEATURES_COUNT} características pero se obtuvieron {combined_high_res.shape[1]}"
-            )
-            assert list(combined_high_res.columns) == FEATURE_COLUMNS_ORDER, (
-                f"Error en {story}: El orden o nombre de las columnas no coincide con FEATURE_COLUMNS_ORDER"
-            )
+            # Decisión técnica: se usa `raise` explícito en vez de `assert` porque esta
+            # invariante debe cumplirse incluso si el proceso se ejecuta con `python -O`
+            # (que descarta los `assert`).
+            if combined_high_res.shape[1] != TOTAL_FEATURES_COUNT:
+                raise ValueError(
+                    f"Error en {story}: Se esperaban {TOTAL_FEATURES_COUNT} características pero se obtuvieron {combined_high_res.shape[1]}"
+                )
+            if list(combined_high_res.columns) != FEATURE_COLUMNS_ORDER:
+                raise ValueError(
+                    f"Error en {story}: El orden o nombre de las columnas no coincide con FEATURE_COLUMNS_ORDER"
+                )
             
             # 1. Exportación principal en Parquet independiente por espacio
             df_phono.to_parquet(FEATURES_OUT_DIR / f"{story}_phonological.parquet")

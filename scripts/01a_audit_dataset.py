@@ -14,15 +14,16 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+import tgt
 
 from src.config import (
     DIR_AUDIT_REPORTS,
     DIR_FMRI,
     DIR_STIMULI,
-    DIR_TEXTGRIDS,
     EXCLUDED_STORIES,
 )
 from src.db_manager import log_execution_time, save_dataframe_to_table
+from src.features.text_parser import discover_available_stories, resolve_textgrid_path
 
 
 def extract_wav_duration(filepath: Path) -> float:
@@ -66,14 +67,46 @@ def parse_bids_fmri_filename(hf5_path: Path) -> Optional[Dict]:
     }
 
 
+def validate_textgrid_content(story: str) -> bool:
+    """Verifica que el TextGrid de una historia sea realmente parseable y utilizable.
+
+    A diferencia de una comprobación por nombre de archivo, intenta leer el
+    TextGrid con tgt (priorizando la versión reparada vía resolve_textgrid_path)
+    y exige la presencia de las capas 'word' y 'phone', que son las que
+    scripts/02_extract_features.py requiere más adelante en el pipeline.
+    """
+    tg_path = resolve_textgrid_path(story)
+    if not tg_path.exists():
+        return False
+
+    try:
+        textgrid = tgt.io.read_textgrid(str(tg_path), include_empty_intervals=True)
+        tier_names = [name.lower() for name in textgrid.get_tier_names()]
+        has_word_tier = any('word' in name for name in tier_names)
+        has_phone_tier = any('phone' in name for name in tier_names)
+        return has_word_tier and has_phone_tier
+    except Exception:
+        return False
+
+
 def audit_experimental_corpus() -> None:
     """Ejecuta la auditoría cruzada entre estímulos, transcripciones y fMRI."""
     print("Iniciando auditoría del corpus empírico (ds003020 v3.1.1)...")
 
     # 1. Auditoría de TextGrids (Inventario lingüístico disponible)
-    textgrids = list(DIR_TEXTGRIDS.rglob("*.TextGrid"))
-    valid_stories = {tg.stem for tg in textgrids if tg.stem not in EXCLUDED_STORIES}
-    print(f"Detectados {len(valid_stories)} TextGrids válidos (Historias no excluidas).")
+    # Decisión técnica: se usa discover_available_stories (fuente cruda o reparada)
+    # en vez de listar únicamente DIR_TEXTGRIDS, para no perder historias cuyo
+    # TextGrid original no es parseable pero sí cuentan con una versión reparada
+    # (generada por scripts/00b_fix_chronological_textgrids.py).
+    available_stories = discover_available_stories()
+    valid_stories = {s for s in available_stories if s not in EXCLUDED_STORIES}
+    print(f"Detectadas {len(valid_stories)} historias con TextGrid disponible (Historias no excluidas).")
+
+    # 1b. Validación de contenido real (no solo existencia del archivo por nombre)
+    print("Validando legibilidad real de cada TextGrid (parseo + capas 'word'/'phone')...")
+    textgrid_validity = {story: validate_textgrid_content(story) for story in valid_stories}
+    n_valid_content = sum(textgrid_validity.values())
+    print(f"TextGrids efectivamente parseables: {n_valid_content}/{len(valid_stories)}.")
 
     # 2. Auditoría de duraciones de audio (Estímulos)
     wav_files = list(DIR_STIMULI.rglob("*.wav"))
@@ -128,6 +161,7 @@ def audit_experimental_corpus() -> None:
         unique_listeners=('subject_id', 'nunique'),
         duration_sec=('duration_sec', 'max')
     ).reset_index()
+    df_stories['has_valid_textgrid'] = df_stories['story'].map(textgrid_validity).fillna(False)
 
     # 5. Persistencia en SQLite y exportación a CSV
     print("Persistiendo metadatos en SQLite y CSV...")
@@ -141,6 +175,10 @@ def audit_experimental_corpus() -> None:
     df_sessions.to_csv(DIR_AUDIT_REPORTS / "audit_sessions.csv", index=False)
 
     print("\n--- Resumen de Auditoría ---")
+    n_invalid = int((~df_stories['has_valid_textgrid']).sum())
+    if n_invalid > 0:
+        invalid_list = df_stories.loc[~df_stories['has_valid_textgrid'], 'story'].tolist()
+        print(f"[ALERTA] {n_invalid} historia(s) con sesiones fMRI pero TextGrid no parseable: {invalid_list}")
     print(f"Total Participantes: {df_subjects.shape[0]}")
     print(f"Total Sesiones fMRI compatibles: {df_sessions.shape[0]}")
     print("\nMuestra de Métricas por Participante:")

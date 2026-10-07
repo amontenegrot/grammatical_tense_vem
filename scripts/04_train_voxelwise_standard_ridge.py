@@ -36,7 +36,7 @@ from src.config import (
 )
 from src.data_loader import load_fmri_data
 from src.db_manager import load_table_to_dataframe, log_execution_time
-from src.models.standard_ridge import StandardVoxelwiseEncoder
+from src.models.standard_ridge import StandardVoxelwiseEncoder, compute_noise_ceiling
 
 
 FEATURES_IN_DIR = DIR_FEATURES_FMRI_TR
@@ -55,7 +55,10 @@ def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
         subject_sessions (pd.DataFrame): Registros de auditoría del participante.
         
     Returns:
-        Tuple: (x_train, y_train, x_test, y_test, story_ids_train). Retorna Nones si faltan datos.
+        Tuple: (x_train, y_train, x_test, y_test, story_ids_train, noise_ceiling).
+            noise_ceiling es None si el participante cuenta con una sola presentación
+            de la historia de prueba (no hay repeticiones para estimar reproducibilidad).
+            Retorna Nones si faltan datos.
     """
     x_train_list, y_train_list, story_ids_list = [], [], []
     test_bold_runs = []
@@ -112,13 +115,13 @@ def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
             story_ids_list.append(np.full(min_samples, story))
             
     if not x_train_list or not test_bold_runs or x_test is None:
-        return None, None, None, None, None
-        
+        return None, None, None, None, None, None
+
     # Ensamblaje de Entrenamiento
     x_train_full = np.vstack(x_train_list)
     y_train_full = np.vstack(y_train_list)
     story_ids_train = np.concatenate(story_ids_list)
-    
+
     # Decisión metodológica del anteproyecto: Promedio temporal de repeticiones de prueba
     # Se calcula el promedio elemento a elemento de las matrices BOLD estandarizadas de test
     # para atenuar el ruido fisiológico no sincronizado con el estímulo.
@@ -128,13 +131,15 @@ def build_matrices(subject_sessions: pd.DataFrame) -> Tuple:
         test_bold_trimmed = [run[:min_test_len, :] for run in test_bold_runs]
         y_test_avg = np.mean(test_bold_trimmed, axis=0, dtype=np.float32)
         x_test = x_test[:min_test_len, :]
+        noise_ceiling = compute_noise_ceiling(test_bold_trimmed)
     else:
         y_test_avg = test_bold_runs[0]
-        
+        noise_ceiling = None
+
     del x_train_list, y_train_list, test_bold_runs
     gc.collect()
-    
-    return x_train_full, y_train_full, x_test, y_test_avg, story_ids_train
+
+    return x_train_full, y_train_full, x_test, y_test_avg, story_ids_train, noise_ceiling
 
 
 def run_subject_level_modeling() -> None:
@@ -163,34 +168,37 @@ def run_subject_level_modeling() -> None:
         subject_records = df_sessions[df_sessions['subject_id'] == subject_id]
         print(f"Ensamblando matrices para {len(subject_records)} sesiones...")
         
-        x_tr, y_tr, x_te, y_te, story_ids = build_matrices(subject_records)
+        x_tr, y_tr, x_te, y_te, story_ids, noise_ceiling = build_matrices(subject_records)
         if x_tr is None:
             print(f"[ERROR] Datos insuficientes para partición Train/Test en {subject_id}.")
             continue
-            
+
         print(f"Entrenamiento: X={x_tr.shape} (43 predictores), Y={y_tr.shape}")
         print(f"Evaluación (Promedio SNR): X={x_te.shape}, Y={y_te.shape}")
         print(f"Historias en entrenamiento: {len(np.unique(story_ids))} narraciones para Story-Blocked CV.")
-        
+        if noise_ceiling is None:
+            print("Advertencia: una sola presentación de la historia de prueba; techo de ruido no estimable (N/A).")
+
         try:
             df_results = encoder.fit_and_evaluate(
-                x_train=x_tr, 
-                y_train=y_tr, 
-                x_test=x_te, 
-                y_test=y_te, 
+                x_train=x_tr,
+                y_train=y_tr,
+                x_test=x_te,
+                y_test=y_te,
                 story_ids_train=story_ids,
-                batch_size=VOXEL_BATCH_SIZE
+                batch_size=VOXEL_BATCH_SIZE,
+                noise_ceiling=noise_ceiling
             )
-            
+
             # Persistencia atómica de resultados
             df_results.to_parquet(subject_out_file, engine='pyarrow', index=False)
             print(f"[ÉXITO] Resultados persistidos en {subject_out_file.name}")
-            
+
         except Exception as e:
             print(f"[ERROR CRÍTICO] Falló el modelamiento para {subject_id}: {str(e)}")
-            
+
         finally:
-            del x_tr, y_tr, x_te, y_te, story_ids
+            del x_tr, y_tr, x_te, y_te, story_ids, noise_ceiling
             if 'df_results' in locals():
                 del df_results
             gc.collect()

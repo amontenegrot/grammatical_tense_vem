@@ -155,9 +155,9 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
         )
 
         layer_dict = {
-            "1. Modelo Global (R2 > 0.01)": vol_global,
-            "2a. Tiempo Gramatical (FDR < 0.05)": vol_tense_sig,
-            "2b. Tiempo Gramatical (Continuo Descriptivo)": vol_tense_div
+            "1. Global model (R2 > 0.01)": vol_global,
+            "2a. Grammatical tense (FDR < 0.05)": vol_tense_sig,
+            "2b. Grammatical tense (descriptive continuum)": vol_tense_div
         }
 
         # 5. Exportación a Visor Web Estático
@@ -167,7 +167,7 @@ def generate_and_export_viewer(subject_id: str, start_server: bool = False) -> N
         cortex.webgl.make_static(
             outpath=str(subject_export_dir),
             data=layer_dict,
-            title=f"VEM Resultados Corticales - {subject_id}"
+            title=f"Cortical map - {subject_id}"
         )
         print(f"[ÉXITO] Visor estático web exportado en: {subject_export_dir}")
 

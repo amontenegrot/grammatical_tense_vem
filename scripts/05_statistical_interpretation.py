@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import (
+    CIRCULAR_SHIFT_MARGIN_SENSITIVITY,
     DIR_PROCESSED,
     PROJECT_ROOT,
     STATISTICAL_ALPHA,
@@ -102,6 +103,33 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
         delta_normalized_p95 = "N/A"
         sig_delta_normalized_mean = "N/A"
 
+    # 5. Nivel de Robustez: Análisis de Sensibilidad del Margen de Exclusión.
+    # Recalcula la significancia FDR usando únicamente desplazamientos a >= 1 HRF completa
+    # de distancia (CIRCULAR_SHIFT_MARGIN_SENSITIVITY) en vez del margen base, para verificar
+    # que la conclusión no dependa de un margen de exclusión arbitrario. Mismo criterio de
+    # compatibilidad retroactiva que las columnas normalizadas por techo de ruido.
+    if 'p_value_fdr_sensitivity' in df.columns:
+        p_fdr_sensitivity = df['p_value_fdr_sensitivity'].values
+    else:
+        p_fdr_sensitivity = np.full(total_voxels, np.nan)
+
+    sensitivity_computable = not np.all(np.isnan(p_fdr_sensitivity))
+
+    if sensitivity_computable:
+        sig_mask_sensitivity = p_fdr_sensitivity < STATISTICAL_ALPHA
+        sig_voxels_sensitivity = int(np.sum(sig_mask_sensitivity))
+        sig_pct_sensitivity = float((sig_voxels_sensitivity / total_voxels) * 100)
+
+        if sig_voxels > 0:
+            n_stable = int(np.sum(sig_mask & sig_mask_sensitivity))
+            sensitivity_stability_pct = f"{float((n_stable / sig_voxels) * 100):.2f}"
+        else:
+            sensitivity_stability_pct = "N/A"
+    else:
+        sig_voxels_sensitivity = 0
+        sig_pct_sensitivity = 0.0
+        sensitivity_stability_pct = "N/A"
+
     return {
         'total_voxels': total_voxels,
         'r2_global_median': r2_global_median,
@@ -123,7 +151,11 @@ def calculate_voxelwise_metrics(df: pd.DataFrame) -> Dict[str, Union[int, float,
         'r2_global_normalized_median': r2_global_normalized_median,
         'delta_normalized_median': delta_normalized_median,
         'delta_normalized_p95': delta_normalized_p95,
-        'sig_delta_normalized_mean': sig_delta_normalized_mean
+        'sig_delta_normalized_mean': sig_delta_normalized_mean,
+        'sensitivity_computable': sensitivity_computable,
+        'sig_voxels_sensitivity_count': sig_voxels_sensitivity,
+        'sig_voxels_sensitivity_pct': sig_pct_sensitivity,
+        'sensitivity_stability_pct': sensitivity_stability_pct
     }
 
 
@@ -182,6 +214,26 @@ def generate_subject_markdown(metrics: Dict, subject_id: str) -> str:
             "- **Desempeño Normalizado por Techo de Ruido:** **N/A** (el participante no cuenta con "
             "repeticiones BOLD de la historia de prueba, o el techo estimado no superó el umbral mínimo "
             "de confiabilidad en ningún vóxel).\n"
+        )
+
+    if metrics['sensitivity_computable']:
+        md += (
+            f"- **Análisis de Sensibilidad del Margen de Exclusión** (desplazamientos restringidos a "
+            f"$\\geq$ {CIRCULAR_SHIFT_MARGIN_SENSITIVITY} TRs, 1 HRF completa, en vez del margen base): "
+            f"{metrics['sig_voxels_sensitivity_count']:,} vóxeles significativos "
+            f"({metrics['sig_voxels_sensitivity_pct']:.2f}% de la corteza)"
+        )
+        if sig_count > 0:
+            md += (
+                f", de los cuales {metrics['sensitivity_stability_pct']}% se mantienen significativos "
+                f"respecto al margen base.\n"
+            )
+        else:
+            md += ".\n"
+    else:
+        md += (
+            "- **Análisis de Sensibilidad del Margen de Exclusión:** **N/A** (la longitud de la historia "
+            "de prueba no deja desplazamientos válidos bajo el margen ampliado).\n"
         )
 
     md += "\n"
@@ -252,6 +304,11 @@ def run_statistical_interpretation() -> None:
         f"- **Cobertura del Techo de Ruido:** En promedio, {df_summary['ceiling_voxels_pct'].mean():.2f}% "
         f"de los vóxeles por participante contaron con un techo de ruido estimable (repeticiones BOLD "
         f"disponibles y reproducibilidad por encima del umbral mínimo de confiabilidad).\n"
+    )
+    markdown_content += (
+        f"- **Robustez al Margen de Exclusión:** En promedio, {df_summary['sig_voxels_sensitivity_pct'].mean():.2f}% "
+        f"de los vóxeles por participante se mantuvieron significativos (FDR) bajo el margen ampliado "
+        f"de {CIRCULAR_SHIFT_MARGIN_SENSITIVITY} TRs (1 HRF completa), en vez del margen base.\n"
     )
 
     # 3. Exportación de artefactos

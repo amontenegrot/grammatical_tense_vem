@@ -21,6 +21,7 @@ from himalaya.ridge import RidgeCV
 
 from src.config import (
     CIRCULAR_SHIFT_MARGIN_MIN,
+    CIRCULAR_SHIFT_MARGIN_SENSITIVITY,
     HIMALAYA_BACKEND,
     NOISE_CEILING_MIN_THRESHOLD,
     NULL_DISTRIBUTION_CHUNK_BYTES,
@@ -169,8 +170,10 @@ class StandardVoxelwiseEncoder:
 
         Returns:
             pd.DataFrame: Resultados por vóxel con R2_global, R2_restringido, Delta_R2,
-                p-value empírico, p-value corregido por FDR, el techo de ruido estimado
-                y las versiones de R2/Delta_R2 normalizadas por dicho techo.
+                p-value empírico, p-value corregido por FDR, el techo de ruido estimado,
+                las versiones de R2/Delta_R2 normalizadas por dicho techo, y el análisis
+                de sensibilidad del margen de exclusión (p-value empírico y FDR recalculados
+                con CIRCULAR_SHIFT_MARGIN_SENSITIVITY en vez de CIRCULAR_SHIFT_MARGIN_MIN).
         """
         n_voxels = y_train.shape[1]
         n_test_samples = y_test.shape[0]
@@ -201,12 +204,26 @@ class StandardVoxelwiseEncoder:
             raise ValueError(
                 f"La longitud de prueba ({n_test_samples} TRs) es insuficiente para el margen de {CIRCULAR_SHIFT_MARGIN_MIN} TRs."
             )
-            
+
+        # Análisis de sensibilidad del margen de exclusión: subconjunto estricto de
+        # valid_shifts que además respeta el margen ampliado (1 HRF completa). Al ser
+        # un subconjunto, no requiere desplazamientos ni predicciones adicionales: se
+        # deriva del mismo null_distribution ya calculado para CIRCULAR_SHIFT_MARGIN_MIN.
+        sensitivity_shift_mask = (
+            (valid_shifts >= CIRCULAR_SHIFT_MARGIN_SENSITIVITY) &
+            (valid_shifts <= n_test_samples - CIRCULAR_SHIFT_MARGIN_SENSITIVITY)
+        )
+        n_shifts_sensitivity = int(np.sum(sensitivity_shift_mask))
+
         # 4. Pre-asignación de memoria para resultados
         r2_global_full = np.zeros(n_voxels, dtype=np.float32)
         r2_restricted_full = np.zeros(n_voxels, dtype=np.float32)
         delta_r2_full = np.zeros(n_voxels, dtype=np.float32)
         p_raw_full = np.zeros(n_voxels, dtype=np.float32)
+
+        # P-valor bajo el margen ampliado (NaN por defecto: "no estimable", ej. historia
+        # de prueba demasiado corta para dejar desplazamientos válidos bajo ese margen).
+        p_raw_sensitivity_full = np.full(n_voxels, np.nan, dtype=np.float32)
 
         # Métricas normalizadas por el techo de ruido (NaN por defecto: "no estimable").
         ceiling_full = np.full(n_voxels, np.nan, dtype=np.float32)
@@ -293,12 +310,23 @@ class StandardVoxelwiseEncoder:
             # Cálculo de valor p empírico con corrección de continuidad (+1)
             exceedance = np.sum(null_distribution >= delta_r2, axis=0)
             p_raw = (exceedance + 1.0) / (n_shifts + 1.0)
-            
+
+            # Mismo cálculo restringido al subconjunto de desplazamientos que respetan
+            # el margen ampliado (reutiliza null_distribution, no agrega cómputo nuevo).
+            if n_shifts_sensitivity >= 1:
+                exceedance_sensitivity = np.sum(
+                    null_distribution[sensitivity_shift_mask, :] >= delta_r2, axis=0
+                )
+                p_raw_sensitivity = (exceedance_sensitivity + 1.0) / (n_shifts_sensitivity + 1.0)
+            else:
+                p_raw_sensitivity = np.full(batch_len, np.nan, dtype=np.float32)
+
             # Almacenamiento en vectores consolidados
             r2_global_full[start_idx:end_idx] = r2_g
             r2_restricted_full[start_idx:end_idx] = r2_r
             delta_r2_full[start_idx:end_idx] = delta_r2
             p_raw_full[start_idx:end_idx] = p_raw
+            p_raw_sensitivity_full[start_idx:end_idx] = p_raw_sensitivity
 
             ceiling_full[start_idx:end_idx] = ceiling_batch
             r2_global_normalized_full[start_idx:end_idx] = r2_g_norm
@@ -311,10 +339,20 @@ class StandardVoxelwiseEncoder:
             
         # 7. Control de la Tasa de Falsos Descubrimientos (FDR Benjamini-Hochberg)
         _, p_fdr, _, _ = multipletests(p_raw_full, alpha=STATISTICAL_ALPHA, method='fdr_bh')
-        
+
         # Resolución estadística empírica mínima alcanzable
         min_detectable_p = 1.0 / (n_shifts + 1.0)
-        
+
+        # FDR y resolución para el análisis de sensibilidad del margen de exclusión.
+        if n_shifts_sensitivity >= 1:
+            _, p_fdr_sensitivity, _, _ = multipletests(
+                p_raw_sensitivity_full, alpha=STATISTICAL_ALPHA, method='fdr_bh'
+            )
+            min_detectable_p_sensitivity = 1.0 / (n_shifts_sensitivity + 1.0)
+        else:
+            p_fdr_sensitivity = np.full(n_voxels, np.nan, dtype=np.float32)
+            min_detectable_p_sensitivity = np.nan
+
         df_results = pd.DataFrame({
             'voxel_idx': np.arange(n_voxels),
             'r2_global': r2_global_full,
@@ -327,7 +365,11 @@ class StandardVoxelwiseEncoder:
             'r2_noise_ceiling': ceiling_full,
             'r2_global_normalized': r2_global_normalized_full,
             'r2_restricted_normalized': r2_restricted_normalized_full,
-            'delta_r2_tense_normalized': delta_r2_normalized_full
+            'delta_r2_tense_normalized': delta_r2_normalized_full,
+            'p_value_raw_sensitivity': p_raw_sensitivity_full,
+            'p_value_fdr_sensitivity': p_fdr_sensitivity,
+            'n_exhaustive_shifts_sensitivity': n_shifts_sensitivity,
+            'p_resolution_min_sensitivity': min_detectable_p_sensitivity
         })
-        
+
         return df_results
